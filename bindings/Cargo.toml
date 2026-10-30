@@ -5,7 +5,7 @@ edition.workspace = true
 
 [lib]
 name = "pokerbot_core"
-crate-typSe = ["cdylib"]
+crate-type = ["cdylib"]
 
 [dependencies]
 core_engine = { path = "../core_engine" }

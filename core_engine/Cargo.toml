@@ -8,6 +8,7 @@ name = "core_engine"
 crate-type = ["rlib"]
 
 [dependencies]
+rand  = "0.8"
 
 [dev-dependencies]
 proptest = "1"
