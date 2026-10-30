@@ -1,0 +1,9 @@
+[project]
+name = "pokerbot-tournament"
+version = "0.1.0"
+description = "Heads-up NLHE tournament engine: 30-agent round robin (Rust core + Python orchestration)."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

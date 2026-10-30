@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "pokerbot-core"
+version = "0.1.0"
+requires-python = ">=3.11"
+description = "PyO3 bindings exposing the Rust core_engine to Python."
+
+[tool.maturin]
+# This crate (bindings/) builds a cdylib named pokerbot_core.
+features = ["pyo3/extension-module"]
