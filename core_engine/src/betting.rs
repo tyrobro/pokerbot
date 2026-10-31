@@ -13,7 +13,7 @@
 //! When amount_to_call == 0 (opening bet) this collapses to
 //! fraction × pot_before_action.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PotFraction {
     Quarter,
     Half,
