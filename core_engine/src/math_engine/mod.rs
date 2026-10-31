@@ -3,6 +3,7 @@
 //! builds these incrementally, level by level.
 
 pub mod level1;
+pub mod level2;
 
 use crate::betting::PotFraction;
 use crate::card::Card;

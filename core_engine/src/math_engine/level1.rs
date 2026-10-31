@@ -108,7 +108,7 @@ fn category_to_percentile(category: HandCategory) -> f64 {
     (category as u8 as f64) / (HandCategory::StraightFlush as u8 as f64)
 }
 
-fn hand_strength_percentile(state: &MathEngineState) -> f64 {
+pub(crate) fn hand_strength_percentile_pub(state: &MathEngineState) -> f64 {
     match state.street {
         Street::Preflop => chen_score_to_percentile(chen_score(state.hole_cards)),
         _ => {
@@ -139,7 +139,7 @@ fn hand_strength_percentile(state: &MathEngineState) -> f64 {
 /// Level 1 recommendation (Section 4.1): tiered percentile thresholds,
 /// fixed raise size, no pot odds, no opponent modeling.
 pub fn recommend(state: &MathEngineState, config: &ThresholdConfig) -> RecommendedAction {
-    let percentile = hand_strength_percentile(state);
+    let percentile = hand_strength_percentile_pub(state);
 
     if percentile >= config.raise_above_percentile {
         RecommendedAction::Raise(config.raise_size)
