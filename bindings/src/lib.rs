@@ -1,7 +1,7 @@
 //! PyO3 binding crate: exposes core_engine to Python as pokerbot_core.
-//! Sprint 5: full play_match binding + the Agent decision callback loop
-//! (Section 4.3's decide_action(state) -> Action contract, called from
-//! Rust into Python for every decision point in every hand).
+//! Sprint 6: hand_summaries now carry full per-hand log data (hole cards,
+//! board, street-tagged action sequence, pot progression, outcome) per
+//! Section 6.2's schema.
 
 use core_engine::betting::{ActionType as RustActionType, PotFraction as RustPotFraction};
 use core_engine::card::Card;
@@ -12,16 +12,11 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::cell::RefCell;
 
-/// Trivial sanity function (Sprint 0) — kept for the Rust<->Python round
-/// trip check.
 #[pyfunction]
 fn ping() -> PyResult<i64> {
     Ok(core_engine::ping())
 }
 
-/// Python-visible snapshot of a HandView (Section 4.3): attribute access
-/// (e.g. `state.own_hole_cards`), not a dict. Cards are (rank, suit)
-/// tuples; rank 2..=14 (11=J,12=Q,13=K,14=A), suit 0..=3 (unordered).
 #[pyclass]
 #[derive(Clone)]
 struct PyHandView {
@@ -53,6 +48,23 @@ fn street_to_str(street: Street) -> &'static str {
         Street::Flop => "FLOP",
         Street::Turn => "TURN",
         Street::River => "RIVER",
+    }
+}
+
+fn action_type_to_str(a: RustActionType) -> &'static str {
+    match a {
+        RustActionType::Fold => "FOLD",
+        RustActionType::Check => "CHECK",
+        RustActionType::Call => "CALL",
+        RustActionType::Raise => "RAISE",
+        RustActionType::AllIn => "ALL_IN",
+    }
+}
+
+fn player_to_str(p: Player) -> &'static str {
+    match p {
+        Player::A => "A",
+        Player::B => "B",
     }
 }
 
@@ -94,8 +106,6 @@ fn parse_pot_fraction(s: &str) -> PyResult<RustPotFraction> {
     }
 }
 
-/// Calls `agent.decide_action(view)` in Python and parses the returned
-/// Action (Section 4.3 contract) back into a Rust Action.
 fn call_agent(py: Python<'_>, agent: &PyObject, view: &RustHandView) -> PyResult<RustAction> {
     let py_view = view_to_py(view);
     let result = agent.call_method1(py, "decide_action", (py_view,))?;
@@ -115,14 +125,40 @@ fn call_agent(py: Python<'_>, agent: &PyObject, view: &RustHandView) -> PyResult
     Ok(RustAction { action_type, size })
 }
 
+/// Converts one HandSummary into the full Python dict a hand's log row
+/// needs (Section 6.2 schema). Cards are (rank, suit) tuples; `actions` is
+/// a list of {street, player, action_type, amount} dicts.
 fn hand_summary_to_py(py: Python<'_>, s: &HandSummary) -> PyResult<PyObject> {
     let dict = PyDict::new(py);
     dict.set_item("hand_number", s.hand_number)?;
-    dict.set_item("button", if s.button == Player::A { "A" } else { "B" })?;
+    dict.set_item("blind_level", s.blind_level)?;
+    dict.set_item("button", player_to_str(s.button))?;
     dict.set_item("small_blind", s.small_blind)?;
     dict.set_item("big_blind", s.big_blind)?;
     dict.set_item("stack_a_after", s.stack_a_after)?;
     dict.set_item("stack_b_after", s.stack_b_after)?;
+    dict.set_item("hole_a", cards_to_tuples(&s.hole_a))?;
+    dict.set_item("hole_b", cards_to_tuples(&s.hole_b))?;
+    dict.set_item("board", cards_to_tuples(&s.board))?;
+
+    let actions: PyResult<Vec<PyObject>> = s
+        .actions
+        .iter()
+        .map(|a| -> PyResult<PyObject> {
+            let d = PyDict::new(py);
+            d.set_item("street", street_to_str(a.street))?;
+            d.set_item("player", player_to_str(a.player))?;
+            d.set_item("action_type", action_type_to_str(a.action_type))?;
+            d.set_item("amount", a.amount)?;
+            Ok(d.into_any().unbind())
+        })
+        .collect();
+    dict.set_item("actions", actions?)?;
+
+    dict.set_item("pot_progression", s.pot_progression.clone())?;
+    dict.set_item("ended_by_fold", s.ended_by_fold)?;
+    dict.set_item("winner", s.winner.map(player_to_str).unwrap_or("SPLIT"))?;
+    dict.set_item("pot_awarded", s.pot_awarded)?;
     Ok(dict.into_any().unbind())
 }
 
@@ -141,9 +177,6 @@ fn match_result_to_py(py: Python<'_>, result: MatchResult) -> PyResult<PyObject>
     Ok(dict.into_any().unbind())
 }
 
-/// Plays a full match between two Python Agent objects (Section 4.3),
-/// driving the Rust engine end to end. `agent_a`/`agent_b` must each
-/// implement `decide_action(state) -> Action` per `agents.base.Agent`.
 #[pyfunction]
 #[pyo3(signature = (
     agent_a,
@@ -182,9 +215,6 @@ fn play_match_py(
         seed,
     };
 
-    // Shared via RefCell (not a plain mut capture) so both closures can
-    // hold only a shared `&` borrow of it simultaneously -- play_match
-    // needs two independently-callable FnMut closures alive at once.
     let error: RefCell<Option<PyErr>> = RefCell::new(None);
 
     let mut py_agent_a = |view: &RustHandView| -> RustAction {

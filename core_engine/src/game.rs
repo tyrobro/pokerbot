@@ -1,12 +1,10 @@
 //! Single-hand game loop (Sprint 3): blinds, hole cards, 4 betting rounds,
-//! showdown or fold resolution, pot awarded.
+//! showdown or fold resolution, pot awarded. Sprint 6 adds action-sequence
+//! and pot-progression logging (Section 6.2 schema) to HandResult.
 //!
 //! Raise sizing uses the pot-after-call convention (see betting.rs doc
-//! comment). Uncalled-excess settlement (a short all-in for less than a
-//! full call means the excess over what the opponent could match was never
-//! at risk, and returns to the larger committer regardless of the eventual
-//! result) is handled uniformly by `settle_uncalled_excess`, used by both
-//! fold and showdown resolution.
+//! comment). Uncalled-excess settlement is handled uniformly by
+//! `settle_uncalled_excess`, used by both fold and showdown resolution.
 
 use crate::betting::{resolve_raise, ActionType, PotFraction};
 use crate::card::{Card, Deck};
@@ -62,6 +60,17 @@ pub struct HandConfig {
     pub stack_b: u64,
 }
 
+/// One entry in the hand's street-tagged action sequence (Section 6.2).
+/// `amount` is the chips this specific action added to the pot (0 for
+/// Fold/Check).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActionLogEntry {
+    pub street: Street,
+    pub player: Player,
+    pub action_type: ActionType,
+    pub amount: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct HandResult {
     pub ended_by_fold: bool,
@@ -71,6 +80,14 @@ pub struct HandResult {
     pub board: Vec<Card>,
     pub hole_a: [Card; 2],
     pub hole_b: [Card; 2],
+    pub actions: Vec<ActionLogEntry>,
+    /// Pot size (committed_a + committed_b) after each action in `actions`,
+    /// index-aligned (Section 6.2: "pot-size progression").
+    pub pot_progression: Vec<u64>,
+    /// The matched pot actually awarded to the winner (excludes any
+    /// uncalled excess returned via `settle_uncalled_excess`). 0 on a
+    /// split pot.
+    pub pot_awarded: u64,
 }
 
 fn player_idx(p: Player) -> usize {
@@ -129,8 +146,6 @@ fn apply_commit(
 /// commitment beyond what the opponent could ever match was never at risk
 /// and is returned to whoever committed more, BEFORE the matched portion
 /// (`2 × min(committed_a, committed_b)`) is awarded to the hand's winner.
-/// Applies at both fold and showdown resolution, heads-up, no side-pot
-/// mechanic needed (Section 3.1).
 fn settle_uncalled_excess(
     committed_a: u64,
     committed_b: u64,
@@ -149,6 +164,7 @@ fn settle_uncalled_excess(
     (awarded_pot, sa, sb)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_by_fold(
     winner: Player,
     stack_a: u64,
@@ -158,6 +174,8 @@ fn finish_by_fold(
     board: Vec<Card>,
     hole_a: [Card; 2],
     hole_b: [Card; 2],
+    actions: Vec<ActionLogEntry>,
+    pot_progression: Vec<u64>,
 ) -> HandResult {
     let (pot, mut stack_a, mut stack_b) =
         settle_uncalled_excess(committed_a, committed_b, stack_a, stack_b);
@@ -173,9 +191,13 @@ fn finish_by_fold(
         board,
         hole_a,
         hole_b,
+        actions,
+        pot_progression,
+        pot_awarded: pot,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn showdown(
     stack_a: u64,
     stack_b: u64,
@@ -185,6 +207,8 @@ fn showdown(
     board: Vec<Card>,
     hole_a: [Card; 2],
     hole_b: [Card; 2],
+    actions: Vec<ActionLogEntry>,
+    pot_progression: Vec<u64>,
 ) -> HandResult {
     let (pot, mut stack_a, mut stack_b) =
         settle_uncalled_excess(committed_a, committed_b, stack_a, stack_b);
@@ -208,9 +232,6 @@ fn showdown(
             Some(Player::B)
         }
         std::cmp::Ordering::Equal => {
-            // Split the MATCHED pot evenly; odd remainder chip goes to the
-            // non-button player (Section 3.1). Any uncalled excess was
-            // already returned above and is untouched by the split.
             let half = pot / 2;
             let remainder = pot % 2;
             stack_a += half;
@@ -231,13 +252,15 @@ fn showdown(
         board,
         hole_a,
         hole_b,
+        actions,
+        pot_progression,
+        pot_awarded: pot,
     }
 }
 
-/// Plays one full hand end-to-end. `deck` is passed in (rather than built
-/// internally) so callers — and tests — control the shuffle: use
-/// `Deck::new()` for real play, `Deck::new_seeded(seed)` for deterministic
-/// reproducibility (Section 8).
+/// Plays one full hand end-to-end. `deck` is passed in so callers control
+/// the shuffle: `Deck::new()` for real play, `Deck::new_seeded(seed)` for
+/// deterministic reproducibility (Section 8).
 pub fn play_hand(
     config: &HandConfig,
     mut deck: Deck,
@@ -253,6 +276,9 @@ pub fn play_hand(
 
     let mut committed_a: u64 = 0;
     let mut committed_b: u64 = 0;
+
+    let mut action_log: Vec<ActionLogEntry> = Vec::new();
+    let mut pot_progression: Vec<u64> = Vec::new();
 
     {
         let (sb_stack, sb_committed) = stacks_mut(
@@ -308,8 +334,6 @@ pub fn play_hand(
             (stack_a == 0 || stack_b == 0) && street_committed_a == street_committed_b;
 
         if !(both_all_in || one_all_in_no_action_needed) {
-            // Heads-up acting order (Section 3.1): SB/button first preflop,
-            // BB/non-button first on every subsequent street.
             let order = if street == Street::Preflop {
                 [sb_player, bb_player]
             } else {
@@ -368,6 +392,13 @@ pub fn play_hand(
 
                 match action.action_type {
                     ActionType::Fold => {
+                        action_log.push(ActionLogEntry {
+                            street,
+                            player: acting,
+                            action_type: ActionType::Fold,
+                            amount: 0,
+                        });
+                        pot_progression.push(committed_a + committed_b);
                         return finish_by_fold(
                             acting.other(),
                             stack_a,
@@ -377,14 +408,23 @@ pub fn play_hand(
                             board,
                             hole_a,
                             hole_b,
+                            action_log,
+                            pot_progression,
                         );
                     }
                     ActionType::Check => {
                         debug_assert_eq!(bet_to_call, 0, "illegal check facing a bet");
                         acted[player_idx(acting)] = true;
+                        action_log.push(ActionLogEntry {
+                            street,
+                            player: acting,
+                            action_type: ActionType::Check,
+                            amount: 0,
+                        });
+                        pot_progression.push(committed_a + committed_b);
                     }
                     ActionType::Call => {
-                        let call_amount = bet_to_call.min(acting_stack); // short all-in call (Section 3.1)
+                        let call_amount = bet_to_call.min(acting_stack); // short all-in call
                         apply_commit(
                             acting,
                             call_amount,
@@ -396,6 +436,13 @@ pub fn play_hand(
                             &mut street_committed_b,
                         );
                         acted[player_idx(acting)] = true;
+                        action_log.push(ActionLogEntry {
+                            street,
+                            player: acting,
+                            action_type: ActionType::Call,
+                            amount: call_amount,
+                        });
+                        pot_progression.push(committed_a + committed_b);
                     }
                     ActionType::Raise | ActionType::AllIn => {
                         let fraction = action.size.unwrap_or(PotFraction::Full);
@@ -406,7 +453,7 @@ pub fn play_hand(
                             last_raise_increment,
                             acting_stack,
                         );
-                        let delta = resolved.amount; // chips this action adds to the pot
+                        let delta = resolved.amount;
 
                         let min_total_for_full_raise = bet_to_call + last_raise_increment;
                         let reopens_betting =
@@ -431,6 +478,13 @@ pub fn play_hand(
                             acted = [false, false];
                         }
                         acted[player_idx(acting)] = true;
+                        action_log.push(ActionLogEntry {
+                            street,
+                            player: acting,
+                            action_type: action.action_type,
+                            amount: delta,
+                        });
+                        pot_progression.push(committed_a + committed_b);
                     }
                 }
 
@@ -454,6 +508,8 @@ pub fn play_hand(
         board,
         hole_a,
         hole_b,
+        action_log,
+        pot_progression,
     )
 }
 
@@ -467,10 +523,9 @@ mod tests {
 
     #[test]
     fn settle_returns_uncalled_excess_to_larger_committer() {
-        // A committed 1000, B only had 600 behind and went all-in for 600.
         let (pot, sa, sb) = settle_uncalled_excess(1000, 600, 0, 0);
-        assert_eq!(pot, 1200); // 2 * min(1000, 600) — the matched portion
-        assert_eq!(sa, 400); // A's uncalled excess (1000-600) returned to A
+        assert_eq!(pot, 1200);
+        assert_eq!(sa, 400);
         assert_eq!(sb, 0);
     }
 
@@ -484,36 +539,50 @@ mod tests {
 
     #[test]
     fn showdown_does_not_award_uncalled_excess_to_a_winning_short_stack() {
-        // B is all-in for 600 and WINS the showdown outright against A,
-        // who bet 1000 total. B must receive only the matched 1200 pot
-        // (600 from each side), not A's extra 400 — that extra was never
-        // at risk and returns to A regardless of the result.
         let board = vec![c(2, 0), c(5, 1), c(9, 2), c(11, 3), c(7, 0)];
-        let hole_a = [c(3, 1), c(4, 2)]; // high card only
-        let hole_b = [c(13, 1), c(13, 2)]; // pair of kings — beats A
+        let hole_a = [c(3, 1), c(4, 2)];
+        let hole_b = [c(13, 1), c(13, 2)];
 
-        let result = showdown(0, 0, 1000, 600, Player::A, board, hole_a, hole_b);
+        let result = showdown(
+            0,
+            0,
+            1000,
+            600,
+            Player::A,
+            board,
+            hole_a,
+            hole_b,
+            Vec::new(),
+            Vec::new(),
+        );
 
         assert_eq!(result.winner, Some(Player::B));
-        assert_eq!(result.final_stack_a, 400); // uncalled excess returned
-        assert_eq!(result.final_stack_b, 1200); // only the matched pot
+        assert_eq!(result.final_stack_a, 400);
+        assert_eq!(result.final_stack_b, 1200);
+        assert_eq!(result.pot_awarded, 1200);
         assert_eq!(result.final_stack_a + result.final_stack_b, 1600);
     }
 
     #[test]
     fn showdown_tie_splits_only_the_matched_pot() {
-        // Identical hands (chop), but one side had uncalled excess — that
-        // excess must still return untouched; only the matched portion
-        // splits.
         let board = vec![c(2, 0), c(5, 1), c(9, 2), c(11, 3), c(7, 0)];
         let hole_a = [c(3, 1), c(4, 2)];
-        let hole_b = [c(3, 2), c(4, 3)]; // same rank pattern -> tie
+        let hole_b = [c(3, 2), c(4, 3)];
 
-        let result = showdown(0, 0, 1000, 600, Player::A, board, hole_a, hole_b);
+        let result = showdown(
+            0,
+            0,
+            1000,
+            600,
+            Player::A,
+            board,
+            hole_a,
+            hole_b,
+            Vec::new(),
+            Vec::new(),
+        );
 
         assert_eq!(result.winner, None);
-        // matched pot 1200, split 600/600, plus A's returned 400 excess,
-        // plus remainder-chip rule doesn't apply here (1200 is even).
         assert_eq!(result.final_stack_a, 400 + 600);
         assert_eq!(result.final_stack_b, 600);
         assert_eq!(result.final_stack_a + result.final_stack_b, 1600);
