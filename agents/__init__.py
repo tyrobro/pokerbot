@@ -1,5 +1,16 @@
-"""Agent interface implementations: math-only wrappers, PD archetypes, and
-the hybrid 25-agent grid (Section 4). Implementation begins at Sprint 5
-(interface) / 7 (math engines) / 8 (PD archetypes) / 13 (grid); this is the
-Sprint 0 empty-but-importable package skeleton.
+"""Agent interface implementations: math-only, PD archetypes, hybrid grid
+(Section 4). Sprint 5: the Agent ABC (base.py) and two trivial stubs
+(stub_agents.py) proving the interface contract end to end.
 """
+
+from agents.base import Action, ActionType, Agent, PotFraction
+from agents.stub_agents import AlwaysCallAgent, AlwaysFoldAgent
+
+__all__ = [
+    "Action",
+    "ActionType",
+    "Agent",
+    "PotFraction",
+    "AlwaysCallAgent",
+    "AlwaysFoldAgent",
+]
