@@ -241,8 +241,8 @@ fn showdown(
 pub fn play_hand(
     config: &HandConfig,
     mut deck: Deck,
-    mut agent_a: impl FnMut(&HandView) -> Action,
-    mut agent_b: impl FnMut(&HandView) -> Action,
+    agent_a: &mut impl FnMut(&HandView) -> Action,
+    agent_b: &mut impl FnMut(&HandView) -> Action,
 ) -> HandResult {
     let hole_a = [deck.deal().unwrap(), deck.deal().unwrap()];
     let hole_b = [deck.deal().unwrap(), deck.deal().unwrap()];

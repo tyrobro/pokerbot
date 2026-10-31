@@ -35,16 +35,16 @@ fn acting_order_is_heads_up_specific() {
     };
     let deck = Deck::new_seeded(1);
 
-    let agent_a = move |view: &HandView| {
+    let mut agent_a = move |view: &HandView| {
         log_a.borrow_mut().push((view.street, view.is_button));
         always_check_call(view)
     };
-    let agent_b = move |view: &HandView| {
+    let mut agent_b = move |view: &HandView| {
         log_b.borrow_mut().push((view.street, view.is_button));
         always_check_call(view)
     };
 
-    let _ = play_hand(&config, deck, agent_a, agent_b);
+    let _ = play_hand(&config, deck, &mut agent_a, &mut agent_b);
 
     let log = log.borrow();
     let first_preflop = log.iter().find(|(s, _)| *s == Street::Preflop).unwrap();
@@ -75,7 +75,12 @@ fn full_hand_pot_math_is_conserved_and_correct_with_no_raises() {
     };
     let deck = Deck::new_seeded(7);
 
-    let result = play_hand(&config, deck, always_check_call, always_check_call);
+    let result = play_hand(
+        &config,
+        deck,
+        &mut always_check_call,
+        &mut always_check_call,
+    );
 
     // Chip conservation: no chips created or destroyed.
     assert_eq!(result.final_stack_a + result.final_stack_b, 200_000);
@@ -104,13 +109,13 @@ fn fold_on_first_action_awards_pot_to_opponent() {
     let deck = Deck::new_seeded(3);
 
     // Button (A) acts first preflop and immediately folds.
-    let agent_a = |_: &HandView| Action {
+    let mut agent_a = |_: &HandView| Action {
         action_type: ActionType::Fold,
         size: None,
     };
-    let agent_b = always_check_call;
+    let mut agent_b = always_check_call;
 
-    let result = play_hand(&config, deck, agent_a, agent_b);
+    let result = play_hand(&config, deck, &mut agent_a, &mut agent_b);
 
     assert!(result.ended_by_fold);
     assert_eq!(result.winner, Some(Player::B));
