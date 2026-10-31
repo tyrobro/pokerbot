@@ -52,7 +52,7 @@ impl Default for ThresholdConfig {
 /// Chen formula: a well-known, deterministic, context-free preflop
 /// starting-hand strength heuristic (0-20+ points). Used here only as an
 /// ordinal ranking source, not reproduced as poker advice/literature text.
-fn chen_score(hole_cards: [Card; 2]) -> f64 {
+pub(crate) fn chen_score(hole_cards: [Card; 2]) -> f64 {
     let mut ranks = [hole_cards[0].rank, hole_cards[1].rank];
     ranks.sort_unstable();
     let (lo, hi) = (ranks[0], ranks[1]);

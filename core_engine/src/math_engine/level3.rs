@@ -20,7 +20,7 @@
 //!       elif equity >= required_equity -> call  (pot odds, Section 3.3)
 //!       else                            -> fold
 
-use super::{MathEngineState, RecommendedAction};
+use super::{remaining_deck, MathEngineState, RecommendedAction};
 use crate::betting::PotFraction;
 use crate::card::Card;
 use crate::hand_eval::evaluate_hand;
@@ -66,22 +66,6 @@ impl Default for ThresholdConfig {
             raise_size: PotFraction::Half,
         }
     }
-}
-
-/// All cards from a fresh 52-card deck not already accounted for by the
-/// agent's own hole cards or the board dealt so far.
-fn remaining_deck(hole: [Card; 2], board: &[Card]) -> Vec<Card> {
-    let mut deck = Vec::with_capacity(52);
-    for suit in 0..4u8 {
-        for rank in 2..=14u8 {
-            let card = Card { rank, suit };
-            if card == hole[0] || card == hole[1] || board.contains(&card) {
-                continue;
-            }
-            deck.push(card);
-        }
-    }
-    deck
 }
 
 /// Monte Carlo equity estimate: fraction of `trials` the hand wins
