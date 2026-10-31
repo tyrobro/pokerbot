@@ -1,7 +1,9 @@
 //! Card representation and a fresh-shuffle-per-hand Deck (Section 3.1).
 
+use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use rand::SeedableRng;
 
 /// rank: 2..=14 (11=J, 12=Q, 13=K, 14=A). suit: 0..=3 (no suit ordering in poker).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,6 +30,17 @@ impl Deck {
         Deck { cards }
     }
 
+    pub fn new_seeded(seed: u64) -> Self {
+        let mut cards = Vec::with_capacity(52);
+        for suit in 0..4u8 {
+            for rank in 2..=14u8 {
+                cards.push(Card { rank, suit });
+            }
+        }
+        let mut rng = StdRng::seed_from_u64(seed);
+        cards.shuffle(&mut rng);
+        Deck { cards }
+    }
     /// Deals one card off the top. `None` once empty.
     pub fn deal(&mut self) -> Option<Card> {
         self.cards.pop()
