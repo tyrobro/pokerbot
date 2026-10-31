@@ -61,11 +61,34 @@ pub type Bucket = u8;
 /// otherwise a flush draw and bottom pair with similar current equity
 /// would be bucketed identically, which is the known weakness
 /// potential-aware abstraction exists to address.
+/// Convenience wrapper: seeds its own RNG from OS entropy internally, so
+/// it is NOT reproducible across calls. Safe for ad-hoc use and for
+/// tests that only check statistical bounds/ordering, NOT for anything
+/// requiring exact determinism (use `bucketing_equity_seeded` there).
 pub fn bucketing_equity(hole: [Card; 2], board: &[Card], config: &BucketConfig) -> f64 {
+    let mut rng = StdRng::seed_from_u64(rand::random::<u64>());
+    bucketing_equity_seeded(hole, board, config, &mut rng)
+}
+
+/// Deterministic variant: draws ALL randomness from the caller-supplied
+/// `rng` instead of re-seeding from OS entropy internally. Required
+/// anywhere reproducibility matters under an outer fixed seed (e.g.
+/// CFRSolver's per-iteration bucket assignment) -- the plain
+/// `bucketing_equity` above is NOT safe for that use (this fixes a real
+/// bug: CFRSolver was silently calling the non-deterministic version for
+/// every bucket assignment, defeating its own `seed` parameter).
+pub fn bucketing_equity_seeded(
+    hole: [Card; 2],
+    board: &[Card],
+    config: &BucketConfig,
+    rng: &mut StdRng,
+) -> f64 {
+    use rand::Rng;
+
     if board.len() == 5 {
         let mc = MonteCarloConfig {
             trials: config.bucketing_trials,
-            seed: None,
+            seed: Some(rng.gen()),
         };
         let state = crate::math_engine::MathEngineState {
             hole_cards: hole,
@@ -82,13 +105,12 @@ pub fn bucketing_equity(hole: [Card; 2], board: &[Card], config: &BucketConfig) 
 
     let remaining = remaining_deck(hole, board);
     let board_needed = 5 - board.len();
-    let mut rng = StdRng::seed_from_u64(rand::random::<u64>());
     let trials = config.bucketing_trials.max(1);
     let mut wins = 0.0f64;
 
     for _ in 0..trials {
         let mut shuffled = remaining.clone();
-        shuffled.shuffle(&mut rng);
+        shuffled.shuffle(rng);
 
         let opp_hole = [shuffled[0], shuffled[1]];
         let mut full_board = board.to_vec();
@@ -149,7 +171,7 @@ impl StreetBuckets {
 /// check/call collapsed to one (legality already disambiguates which is
 /// possible at a given node, same convention `game.rs` uses), and the 4
 /// discrete raise/bet sizes plus all-in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ActionAbstraction {
     Fold,
     CheckCall,
@@ -204,7 +226,7 @@ impl ActionAbstraction {
 /// far this street (raise count + facing-bet state is enough to
 /// reconstruct legality; full action-type sequence is kept for the
 /// regret-table key so distinct lines aren't conflated).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InfoSetKey {
     pub bucket: Bucket,
     pub street: Street,

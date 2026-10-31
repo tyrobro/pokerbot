@@ -10,7 +10,7 @@ use crate::betting::{resolve_raise, ActionType, PotFraction};
 use crate::card::{Card, Deck};
 use crate::hand_eval::evaluate_hand;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Player {
     A,
     B,
@@ -25,7 +25,7 @@ impl Player {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Street {
     Preflop,
     Flop,

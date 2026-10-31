@@ -19,7 +19,9 @@
 //! on top of what's here.
 
 pub mod abstraction;
+pub mod cfr;
 
 pub use abstraction::{
     ActionAbstraction, BettingNode, BucketConfig, CFRConfig, InfoSetKey, StreetBuckets,
 };
+pub use cfr::CFRSolver;
