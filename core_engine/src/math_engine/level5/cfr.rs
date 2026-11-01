@@ -188,7 +188,7 @@ fn action_stake(action: ActionAbstraction) -> f64 {
     }
 }
 
-fn sample_action(
+pub(crate) fn sample_action(
     strategy: &BTreeMap<ActionAbstraction, f64>,
     legal: &[ActionAbstraction],
     rng: &mut StdRng,
@@ -693,6 +693,10 @@ impl CFRSolver {
         self.regrets.len()
     }
 
+    pub fn config(&self) -> &CFRConfig {
+        &self.config
+    }
+
     // ---- LBR (Local Best Response): sampled exploitability estimate ----
 
     /// LBR-estimated exploitability (Lisý & Bowling): for each player,
@@ -920,6 +924,42 @@ impl CFRSolver {
             rng,
             node_budget,
         )
+    }
+}
+
+#[cfg(test)]
+impl CFRSolver {
+    /// Test-only: exposes the RAW regret-matching strategy (the thing
+    /// recommend() must NEVER sample from -- only the average strategy
+    /// carries CFR's convergence guarantee). Visible only so tests can
+    /// prove the two tables genuinely diverge and that recommend()'s
+    /// wiring to the correct one is actually load-bearing.
+    pub(crate) fn current_strategy_at(
+        &self,
+        key: &InfoSetKey,
+    ) -> Option<BTreeMap<ActionAbstraction, f64>> {
+        let legal = ActionAbstraction::legal_at(
+            key.facing_bet,
+            key.raises_this_street,
+            self.config.max_raises_per_street,
+        );
+        self.regrets.get(key).map(|e| e.current_strategy(&legal))
+    }
+
+    /// Test-only: directly injects a crafted info-set entry, bypassing
+    /// actual training. Used to deliberately make regret_sum and
+    /// strategy_sum disagree, proving recommend() follows strategy_sum.
+    pub(crate) fn test_inject_entry(
+        &mut self,
+        key: InfoSetKey,
+        regret_sum: Vec<(ActionAbstraction, f64)>,
+        strategy_sum: Vec<(ActionAbstraction, f64)>,
+    ) {
+        let entry = RegretEntry {
+            regret_sum: regret_sum.into_iter().collect(),
+            strategy_sum: strategy_sum.into_iter().collect(),
+        };
+        self.regrets.insert(key, entry);
     }
 }
 

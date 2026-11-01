@@ -20,8 +20,10 @@
 
 pub mod abstraction;
 pub mod cfr;
+pub mod recommend;
 
 pub use abstraction::{
     ActionAbstraction, BettingNode, BucketConfig, CFRConfig, InfoSetKey, StreetBuckets,
 };
 pub use cfr::{CFRSolver, LbrConfig, TrainingTrace};
+pub use recommend::{recommend as l5_recommend, Actor, HandActionLogEntry};
