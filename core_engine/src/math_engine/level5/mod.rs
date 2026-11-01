@@ -24,4 +24,4 @@ pub mod cfr;
 pub use abstraction::{
     ActionAbstraction, BettingNode, BucketConfig, CFRConfig, InfoSetKey, StreetBuckets,
 };
-pub use cfr::CFRSolver;
+pub use cfr::{BestResponseConfig, CFRSolver, TrainingTrace};
