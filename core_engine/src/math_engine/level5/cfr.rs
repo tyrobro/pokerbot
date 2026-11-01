@@ -1,39 +1,38 @@
 //! Monte Carlo CFR (external sampling) over the FULL hand across all 4
-//! streets (Section 4.1: "Discounted CFR solve"), plus a SAMPLED best-
-//! response solver for exploitability, computed at checkpoints per the
-//! PRD author's dual-metric plan:
+//! streets (Section 4.1: "Discounted CFR solve"), plus a Local Best
+//! Response (LBR) solver for sampled exploitability, computed at
+//! checkpoints per the PRD author's dual-metric plan:
 //!   - average cumulative regret: computed every iteration, cheap,
 //!     free byproduct of the CFR loop, internal sanity signal only.
-//!   - exploitability: computed periodically (every `checkpoint_every`
-//!     iterations) via a best-response solver.
+//!   - LBR (sampled exploitability): computed periodically (every
+//!     `checkpoint_every` iterations) via a Local Best Response solver.
 //!
-//! Exploitability approximation (flagged, escalated beyond the original
-//! plan): true exploitability requires exact best response -- summing
-//! EXACTLY over the opponent's full action distribution at every node.
-//! A first attempt at that produced an intractable combinatorial blowup
-//! (no sampling anywhere in best-response, unlike the CFR solve, which
-//! samples the opponent's action). The fix applied here:
-//!   1. The opponent's action in best-response is now SAMPLED
-//!      proportional to their average strategy (same technique as CFR's
-//!      own external sampling), not summed exactly. This is a named,
-//!      standard technique (sampled / Local Best Response) -- unbiased
-//!      in expectation as `sample_deals` grows, but a real downgrade
-//!      from exact best response, not just a performance tweak.
-//!   2. Best response uses its OWN, TIGHTER safety cap per street
-//!      (`BR_SAFETY_CAP_PER_STREET = 2`) than the CFR solve's
-//!      (`SAFETY_CAP_PER_STREET = 4`), since its own-node max-over-
-//!      actions is costlier per node. This means exploitability is
-//!      measured over a slightly SHORTER abstracted action-sequence
-//!      space than what CFR actually trains on.
-//! Both of these are judgment calls under time/tractability pressure,
-//! not confirmed with the PRD author the way the cross-street-linkage
-//! fix was -- flagged for review, not silently decided.
+//! Naming precision (PRD-author-required, same principle as the earlier
+//! "monotonically" correction): this metric is called "LBR" or "sampled
+//! exploitability" everywhere -- NEVER "true exploitability" or bare
+//! "exploitability" -- because it is not exact. Exact best response is
+//! intractable at this scale; Local Best Response (Lisý & Bowling) is the
+//! standard, published technique for measuring exploitability in
+//! large-scale poker bots by sampling the opponent's action proportional
+//! to their average strategy rather than summing over it exactly.
+//! PRD-author-confirmed: this is the right tool for the job, not an
+//! improvised workaround.
+//!
+//! LBR's raise-depth cap matches training's EXACTLY (reuses
+//! `CFRConfig.max_raises_per_street` and the same `SAFETY_CAP_PER_STREET`
+//! backstop) -- a PRD-author-required fix. An earlier draft used a
+//! tighter cap for LBR than training, which would have introduced a
+//! one-directional bias (the metric unable to explore lines the real
+//! policy can actually take, making convergence look better than it is)
+//! -- exactly the kind of bias that defeats the point of having this
+//! metric. If LBR needs to be cheaper, the lever is `checkpoint_every`
+//! (compute it less often), never narrowing the action space it explores.
 //!
 //! External sampling (Lanctot et al. 2009) for the CFR solve itself:
 //! sample one full deal per iteration, recurse the hand tree across all
 //! 4 streets in one trajectory per traverser. At the traverser's own
-//! nodes, enumerate every legal action exactly. At the opponent's
-//! nodes, sample one action from their current strategy.
+//! nodes, enumerate every legal action exactly. At the opponent's nodes,
+//! sample one action from their current strategy.
 //!
 //! Discounted CFR (Brown & Sandholm 2019) discount schedule
 //! (alpha=1.5, beta=0.5, gamma=2.0), same as before.
@@ -56,22 +55,27 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use std::collections::BTreeMap;
 
-/// Training's safety cap (see module doc): bounds the CFR solve, which
-/// samples the opponent's action, so this can stay relatively generous.
+/// Shared by BOTH the CFR solve and LBR (PRD-author-required: they must
+/// match exactly, not use separate tighter/looser values).
 const SAFETY_CAP_PER_STREET: u16 = 4;
 
-/// Best-response's OWN, tighter safety cap (see module doc): best
-/// response's own-node max-over-actions is costlier per node than
-/// training's sampled traversal, so it needs a tighter bound to stay
-/// tractable even with opponent-sampling applied.
-const BR_SAFETY_CAP_PER_STREET: u16 = 2;
-
 const TRAIN_NODE_VISIT_BUDGET: u64 = 5_000_000;
-const BR_NODE_VISIT_BUDGET: u64 = 500_000;
+const LBR_NODE_VISIT_BUDGET: u64 = 2_000_000;
+
+/// Normalized per-player stack cap for this simplified stake model (not
+/// yet wired to real chip math -- see module doc). Mirrors Section 3.3's
+/// own all-in-override rule, applied here as a hard per-player
+/// investment cap, so repeated raises can't compound into implausible
+/// terminal values.
 const NORMALIZED_STACK: f64 = 1.0;
 
 #[derive(Debug, Clone, PartialEq)]
 struct RegretEntry {
+    // BTreeMap, not HashMap: these get SUMMED, and HashMap randomizes
+    // its iteration order per-process -- summing the same floats in a
+    // different order produces tiny but real discrepancies, which broke
+    // exact-reproducibility (Section 8). BTreeMap's sorted, fixed
+    // iteration order fixes this at the root.
     regret_sum: BTreeMap<ActionAbstraction, f64>,
     strategy_sum: BTreeMap<ActionAbstraction, f64>,
 }
@@ -215,7 +219,6 @@ fn apply_action_bookkeeping(
     invested_a: f64,
     invested_b: f64,
     acting: Traverser,
-    safety_cap: u16,
 ) -> StepOutcome {
     let stake = action_stake(action);
     let pot_before = invested_a + invested_b;
@@ -238,7 +241,11 @@ fn apply_action_bookkeeping(
         Traverser::B => next_invested_b += add,
     }
 
-    let safety_cap_reached = (actions_this_street as u16) + 1 >= safety_cap;
+    // Safety backstop: AllIn is always legal, but unlike CheckCall it
+    // never by itself closes a betting round. Same constant for BOTH
+    // training and LBR (PRD-author-required) -- see module doc.
+    let safety_cap_reached = (actions_this_street as u16) + 1 >= SAFETY_CAP_PER_STREET;
+
     let street_closes =
         (action == ActionAbstraction::CheckCall && actions_this_street > 0) || safety_cap_reached;
     let next_raises = if matches!(
@@ -271,24 +278,34 @@ pub struct CFRSolver {
     node_visits: u64,
 }
 
+/// Config for the LBR (Local Best Response) solver -- Lisý & Bowling's
+/// technique for estimating exploitability by sampling the opponent's
+/// action rather than summing over it exactly (PRD-author-confirmed as
+/// the correct, standard tool here, not an improvised workaround).
 #[derive(Debug, Clone, Copy)]
-pub struct BestResponseConfig {
-    /// Deals averaged per exploitability checkpoint (Monte Carlo
-    /// estimate at TWO levels now: deal sampling AND opponent-action
-    /// sampling -- see module doc).
+pub struct LbrConfig {
+    /// Deals averaged per LBR checkpoint (Monte Carlo estimate at two
+    /// levels: deal sampling AND opponent-action sampling).
     pub sample_deals: u32,
 }
 
-impl Default for BestResponseConfig {
+impl Default for LbrConfig {
     fn default() -> Self {
-        BestResponseConfig { sample_deals: 200 }
+        LbrConfig { sample_deals: 200 }
     }
 }
 
+/// Result of one `train()` call: dual-cadence traces per the PRD
+/// author's dual-metric plan.
 #[derive(Debug, Clone)]
 pub struct TrainingTrace {
+    /// Average cumulative regret, one entry per iteration. Cheap,
+    /// internal sanity signal only.
     pub regret_trace: Vec<f64>,
-    pub exploitability_trace: Vec<f64>,
+    /// LBR-estimated (sampled) exploitability, one entry per checkpoint
+    /// (or empty if `checkpoint_every == 0`). NOT exact -- see module
+    /// doc on why this is named "LBR," never "true exploitability."
+    pub lbr_exploitability_trace: Vec<f64>,
 }
 
 impl CFRSolver {
@@ -340,14 +357,18 @@ impl CFRSolver {
         }
     }
 
+    /// Runs `iterations` of external-sampling Discounted CFR. Every
+    /// `checkpoint_every` iterations (if > 0), also computes LBR-
+    /// estimated exploitability via `lbr_config`. Pass
+    /// `checkpoint_every = 0` to skip LBR entirely.
     pub fn train(
         &mut self,
         iterations: u32,
         checkpoint_every: u32,
-        br_config: &BestResponseConfig,
+        lbr_config: &LbrConfig,
     ) -> TrainingTrace {
         let mut regret_trace = Vec::with_capacity(iterations as usize);
-        let mut exploitability_trace = Vec::new();
+        let mut lbr_exploitability_trace = Vec::new();
 
         for _ in 0..iterations {
             self.iteration += 1;
@@ -380,13 +401,13 @@ impl CFRSolver {
             regret_trace.push(self.average_cumulative_regret());
 
             if checkpoint_every > 0 && self.iteration % checkpoint_every == 0 {
-                exploitability_trace.push(self.exploitability_estimate(br_config));
+                lbr_exploitability_trace.push(self.lbr_exploitability_estimate(lbr_config));
             }
         }
 
         TrainingTrace {
             regret_trace,
-            exploitability_trace,
+            lbr_exploitability_trace,
         }
     }
 
@@ -542,7 +563,6 @@ impl CFRSolver {
             invested_a,
             invested_b,
             acting,
-            SAFETY_CAP_PER_STREET,
         );
 
         if outcome.street_closes {
@@ -637,6 +657,7 @@ impl CFRSolver {
         }
     }
 
+    /// Cheap per-iteration sanity signal (NOT the exploitability metric).
     pub fn average_cumulative_regret(&self) -> f64 {
         if self.regrets.is_empty() {
             return 0.0;
@@ -672,9 +693,17 @@ impl CFRSolver {
         self.regrets.len()
     }
 
-    // ---- Sampled best response / exploitability ----
+    // ---- LBR (Local Best Response): sampled exploitability estimate ----
 
-    pub fn exploitability_estimate(&mut self, config: &BestResponseConfig) -> f64 {
+    /// LBR-estimated exploitability (Lisý & Bowling): for each player,
+    /// best-response value against the OTHER player's current average
+    /// strategy -- with the opponent's action SAMPLED proportional to
+    /// their average strategy, not summed exactly (PRD-author-confirmed
+    /// standard technique) -- averaged over sampled deals, then averaged
+    /// over both players. Trends toward 0 as training approaches
+    /// equilibrium. NEVER call this "true exploitability" -- see module
+    /// doc.
+    pub fn lbr_exploitability_estimate(&mut self, config: &LbrConfig) -> f64 {
         let mut total = 0.0;
         for _ in 0..config.sample_deals.max(1) {
             let deal = self.sample_deal();
@@ -683,21 +712,21 @@ impl CFRSolver {
             let mut rng_a = StdRng::seed_from_u64(seed_a);
             let mut rng_b = StdRng::seed_from_u64(seed_b);
 
-            let br_a = self.best_response_value(&deal, Traverser::A, &mut rng_a);
-            let br_b = self.best_response_value(&deal, Traverser::B, &mut rng_b);
-            total += (br_a + br_b) / 2.0;
+            let lbr_a = self.local_best_response_value(&deal, Traverser::A, &mut rng_a);
+            let lbr_b = self.local_best_response_value(&deal, Traverser::B, &mut rng_b);
+            total += (lbr_a + lbr_b) / 2.0;
         }
         (total / config.sample_deals.max(1) as f64).max(0.0)
     }
 
-    fn best_response_value(
+    fn local_best_response_value(
         &self,
         deal: &SampledDeal,
         traverser: Traverser,
         rng: &mut StdRng,
     ) -> f64 {
         let mut node_budget: u64 = 0;
-        self.br_traverse(
+        self.lbr_traverse(
             deal,
             Vec::new(),
             Street::Preflop,
@@ -714,7 +743,7 @@ impl CFRSolver {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn br_traverse(
+    fn lbr_traverse(
         &self,
         deal: &SampledDeal,
         history: Vec<ActionAbstraction>,
@@ -742,7 +771,7 @@ impl CFRSolver {
             // enumerating exactly.
             let mut best = f64::NEG_INFINITY;
             for &action in &legal {
-                let v = self.br_step(
+                let v = self.lbr_step(
                     deal,
                     &history,
                     action,
@@ -762,9 +791,10 @@ impl CFRSolver {
             }
             best
         } else {
-            // SAMPLED opponent action (see module doc: this is the
-            // approximation that makes best-response tractable here,
-            // at the cost of exactness).
+            // LBR: the opponent's action is SAMPLED proportional to
+            // their average strategy (Lisý & Bowling), not summed
+            // exactly -- this is what makes LBR tractable, and it's the
+            // precise source of the "sampled," not "true," naming.
             let bucket = match acting {
                 Traverser::A => deal.bucket_a[street_index(street)],
                 Traverser::B => deal.bucket_b[street_index(street)],
@@ -782,7 +812,7 @@ impl CFRSolver {
             });
             let action = sample_action(&strategy, &legal, rng);
 
-            self.br_step(
+            self.lbr_step(
                 deal,
                 &history,
                 action,
@@ -800,7 +830,7 @@ impl CFRSolver {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn br_step(
+    fn lbr_step(
         &self,
         deal: &SampledDeal,
         history: &[ActionAbstraction],
@@ -817,8 +847,9 @@ impl CFRSolver {
     ) -> f64 {
         *node_budget += 1;
         assert!(
-            *node_budget < BR_NODE_VISIT_BUDGET,
-            "Best-response traversal exceeded {BR_NODE_VISIT_BUDGET} node visits."
+            *node_budget < LBR_NODE_VISIT_BUDGET,
+            "LBR traversal exceeded {LBR_NODE_VISIT_BUDGET} node visits -- if this needs to be \
+             cheaper, reduce checkpoint_every, not the action space being explored."
         );
 
         if action == ActionAbstraction::Fold {
@@ -843,12 +874,11 @@ impl CFRSolver {
             invested_a,
             invested_b,
             acting,
-            BR_SAFETY_CAP_PER_STREET,
         );
 
         if outcome.street_closes {
             return match next_street(street) {
-                Some(ns) => self.br_traverse(
+                Some(ns) => self.lbr_traverse(
                     deal,
                     next_history,
                     ns,
@@ -876,7 +906,7 @@ impl CFRSolver {
             Traverser::B => Traverser::A,
         };
 
-        self.br_traverse(
+        self.lbr_traverse(
             deal,
             next_history,
             street,
@@ -899,6 +929,9 @@ mod tests {
     use crate::math_engine::level5::abstraction::BucketConfig;
 
     fn test_config() -> CFRConfig {
+        // Deliberately smaller than CFRConfig::default() (10 buckets, 3
+        // raises/street): these are Sprint 9 calibration targets for the
+        // real training run. Unit tests here need to stay fast.
         CFRConfig {
             buckets: BucketConfig {
                 num_buckets: 6,
@@ -908,8 +941,8 @@ mod tests {
         }
     }
 
-    fn no_checkpoint() -> BestResponseConfig {
-        BestResponseConfig { sample_deals: 1 }
+    fn no_checkpoint() -> LbrConfig {
+        LbrConfig { sample_deals: 1 }
     }
 
     #[test]
@@ -972,13 +1005,10 @@ mod tests {
     #[test]
     fn regret_trends_downward_over_training() {
         // Larger iteration count + a noise tolerance, not strict `<`:
-        // the normalized-stack cap (added to fix an unbounded-value bug)
-        // makes this abstracted game converge quickly, so after enough
-        // iterations the trace sits near a noise floor rather than still
-        // visibly descending. "Trends downward" (PRD author's
-        // correction) allows for that -- a small tolerance distinguishes
-        // "flat at the floor" (acceptable) from "trending back up"
-        // (a real regression).
+        // the normalized-stack cap makes this abstracted game converge
+        // quickly, so after enough iterations the trace sits near a
+        // noise floor rather than still visibly descending. "Trends
+        // downward" (not strictly monotonic) allows for that.
         let mut solver = CFRSolver::new(test_config(), 4);
         let trace = solver.train(150, 0, &no_checkpoint());
 
@@ -1009,73 +1039,103 @@ mod tests {
         assert_eq!(solver_1.regrets, solver_2.regrets);
     }
 
-    // ---- exploitability / sampled best response ----
-    // Deliberately small parameters (sample_deals, iterations) -- best
-    // response is costlier per call than training, even with sampling.
+    // ---- LBR / sampled exploitability ----
 
     #[test]
     fn dual_cadence_trace_lengths_match_iterations_and_checkpoints() {
         let mut solver = CFRSolver::new(test_config(), 5);
-        let br_config = BestResponseConfig { sample_deals: 2 };
-        let trace = solver.train(12, 4, &br_config);
+        let lbr_config = LbrConfig { sample_deals: 2 };
+        let trace = solver.train(12, 4, &lbr_config);
 
         assert_eq!(trace.regret_trace.len(), 12);
-        assert_eq!(trace.exploitability_trace.len(), 3); // 12 / 4
+        assert_eq!(trace.lbr_exploitability_trace.len(), 3); // 12 / 4
     }
 
     #[test]
-    fn checkpoint_every_zero_disables_exploitability_entirely() {
+    fn checkpoint_every_zero_disables_lbr_entirely() {
         let mut solver = CFRSolver::new(test_config(), 6);
-        let trace = solver.train(10, 0, &BestResponseConfig::default());
-        assert!(trace.exploitability_trace.is_empty());
+        let trace = solver.train(10, 0, &LbrConfig::default());
+        assert!(trace.lbr_exploitability_trace.is_empty());
         assert_eq!(trace.regret_trace.len(), 10);
     }
 
     #[test]
-    fn exploitability_is_never_negative() {
+    fn lbr_exploitability_is_never_negative() {
         let mut solver = CFRSolver::new(test_config(), 7);
-        let br_config = BestResponseConfig { sample_deals: 3 };
-        let trace = solver.train(10, 5, &br_config);
+        let lbr_config = LbrConfig { sample_deals: 3 };
+        let trace = solver.train(10, 5, &lbr_config);
 
-        for &e in &trace.exploitability_trace {
+        for &e in &trace.lbr_exploitability_trace {
             assert!(e >= 0.0);
             assert!(e.is_finite());
         }
     }
 
     #[test]
-    fn exploitability_trends_downward_over_training() {
-        // Same rationale as regret_trends_downward_over_training: more
-        // checkpoints (not just first-vs-last single values, which are
-        // highly sensitive to sampling noise given the small
-        // sample_deals this test can afford) and a noise tolerance on
-        // top of the already-corrected "trend, not strict monotonic"
-        // comparison.
+    fn lbr_exploitability_trends_downward_over_training() {
         let mut solver = CFRSolver::new(test_config(), 8);
-        let br_config = BestResponseConfig { sample_deals: 6 };
-        let trace = solver.train(100, 10, &br_config); // 10 checkpoints
+        let lbr_config = LbrConfig { sample_deals: 6 };
+        let trace = solver.train(100, 10, &lbr_config); // 10 checkpoints
 
-        let half = trace.exploitability_trace.len() / 2;
+        let half = trace.lbr_exploitability_trace.len() / 2;
         let first_half_avg: f64 =
-            trace.exploitability_trace[0..half].iter().sum::<f64>() / half as f64;
-        let second_half_avg: f64 = trace.exploitability_trace[half..].iter().sum::<f64>()
-            / (trace.exploitability_trace.len() - half) as f64;
+            trace.lbr_exploitability_trace[0..half].iter().sum::<f64>() / half as f64;
+        let second_half_avg: f64 = trace.lbr_exploitability_trace[half..].iter().sum::<f64>()
+            / (trace.lbr_exploitability_trace.len() - half) as f64;
 
         let tolerance = first_half_avg * 0.15;
         assert!(
             second_half_avg <= first_half_avg + tolerance,
-            "exploitability trended upward beyond noise tolerance: first_half={first_half_avg}, second_half={second_half_avg}"
+            "LBR exploitability trended upward beyond noise tolerance: first_half={first_half_avg}, second_half={second_half_avg}"
         );
     }
 
     #[test]
-    fn best_response_against_self_consistent_strategy_is_reasonably_small() {
+    fn lbr_against_self_consistent_strategy_is_reasonably_small() {
         let mut solver = CFRSolver::new(test_config(), 9);
-        let br_config = BestResponseConfig { sample_deals: 5 };
-        let trace = solver.train(20, 10, &br_config);
+        let lbr_config = LbrConfig { sample_deals: 5 };
+        let trace = solver.train(20, 10, &lbr_config);
 
-        for &e in &trace.exploitability_trace {
-            assert!(e < 10.0, "exploitability implausibly large: {e}");
+        for &e in &trace.lbr_exploitability_trace {
+            assert!(e < 10.0, "LBR exploitability implausibly large: {e}");
         }
+    }
+
+    #[test]
+    fn lbr_raise_depth_cap_matches_training_exactly() {
+        // PRD-author-required fix, tested directly: LBR's legal-action
+        // computation must use the SAME max_raises_per_street as
+        // training, via the same ActionAbstraction::legal_at call --
+        // not a separately configured, tighter cap. This test confirms
+        // a higher max_raises_per_street actually produces more raise
+        // options available to LBR's own traversal, proving no separate
+        // ceiling is silently capping it below the config value.
+        let config_low = CFRConfig {
+            buckets: BucketConfig {
+                num_buckets: 4,
+                bucketing_trials: 20,
+            },
+            max_raises_per_street: 1,
+        };
+        let config_high = CFRConfig {
+            buckets: BucketConfig {
+                num_buckets: 4,
+                bucketing_trials: 20,
+            },
+            max_raises_per_street: 3,
+        };
+
+        let actions_low = ActionAbstraction::legal_at(true, 1, config_low.max_raises_per_street);
+        let actions_high = ActionAbstraction::legal_at(true, 1, config_high.max_raises_per_street);
+
+        // At raises_this_street=1: capped out under config_low (cap=1),
+        // still open under config_high (cap=3) -- so raises should be
+        // legal under config_high but not config_low.
+        assert!(!actions_low
+            .iter()
+            .any(|a| matches!(a, ActionAbstraction::Raise(_))));
+        assert!(actions_high
+            .iter()
+            .any(|a| matches!(a, ActionAbstraction::Raise(_))));
     }
 }
