@@ -10,3 +10,4 @@ crate-type = ["cdylib"]
 [dependencies]
 core_engine = { path = "../core_engine" }
 pyo3 = { version = "0.23", features = ["extension-module"] }
+rand = "0.8"

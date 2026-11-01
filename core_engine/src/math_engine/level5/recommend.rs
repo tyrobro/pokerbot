@@ -33,7 +33,29 @@
 //! Section 4.3's own listed field ("full betting-action sequence for the
 //! CURRENT hand"), distinct from Section 4.4's opponent-history object
 //! that ObservedActions.match_history represents.
-
+//!
+//! CALLER CONTRACT, STATED PRECISELY (not a generic "state-threading is
+//! future work" caveat -- this is a known, higher-severity failure mode
+//! than L4's analogous gap): an empty or incomplete `hand_log` does NOT
+//! degrade gracefully the way L4's empty ObservedActions does. L4's
+//! empty-input case is a designed, tested fallback (Section 4.4's
+//! opponent-memory gap, validated: `empty_observed_actions_means_no_narrowing`).
+//! Here, an incomplete hand_log makes `reconstruct_street_state` silently
+//! undercount `raises_this_street` (e.g. reporting 0 when real raises
+//! occurred), which produces a CONFIDENTLY WRONG InfoSetKey -- one that
+//! will often still successfully match a real trained entry, just the
+//! WRONG one, rather than tripping the unseen-key fallback chain (nearest
+//! bucket / L4 safety net) that only triggers when no entry matches at
+//! all. This is a silent correctness bug in the caller's hands, not a
+//! flagged degenerate case in this function's. Any caller that cannot
+//! supply the complete, accurate both-players action log for the current
+//! hand (e.g. the Sprint 7 Python bindings, which always pass an empty
+//! log -- see bindings/src/lib.rs and agents/math_agents.py) must be
+//! treated as producing an L5 agent whose InfoSetKey lookups are
+//! UNVERIFIED past the first action of each street, not merely
+//! "conservative" or "uninformed." Tracked explicitly as a named
+//! precondition for trusting any Sprint 9 calibration run that includes
+//! L5 -- do not fold this into the generic Monte-Carlo-seeding gap below.
 use super::abstraction::{
     bucketing_equity_seeded, equity_to_bucket, ActionAbstraction, InfoSetKey,
 };

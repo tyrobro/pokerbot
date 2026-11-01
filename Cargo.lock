@@ -146,6 +146,7 @@ version = "0.1.0"
 dependencies = [
  "core_engine",
  "pyo3",
+ "rand",
 ]
 
 [[package]]
