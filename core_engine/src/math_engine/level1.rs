@@ -108,7 +108,7 @@ fn category_to_percentile(category: HandCategory) -> f64 {
     (category as u8 as f64) / (HandCategory::StraightFlush as u8 as f64)
 }
 
-pub(crate) fn hand_strength_percentile_pub(state: &MathEngineState) -> f64 {
+pub fn hand_strength_percentile_pub(state: &MathEngineState) -> f64 {
     match state.street {
         Street::Preflop => chen_score_to_percentile(chen_score(state.hole_cards)),
         _ => {

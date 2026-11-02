@@ -1,7 +1,6 @@
 """Agent interface implementations: math-only, PD archetypes, hybrid grid
-(Section 4). Sprint 5: the Agent ABC (base.py) and two trivial stubs
-(stub_agents.py). Sprint 7 close-out: all 5 math-engine levels wrapped
-as Agents (math_agents.py), completing Sprint 7's Definition of Done.
+(Section 4). Sprint 5: Agent ABC + stubs. Sprint 7 close-out: all 5 math
+levels wrapped as Agents. Sprint 8: the 5 PD archetype agents.
 """
 
 from agents.base import Action, ActionType, Agent, PotFraction
@@ -11,6 +10,16 @@ from agents.math_agents import (
     MathLevel3Agent,
     MathLevel4Agent,
     MathLevel5Agent,
+)
+from agents.pd_archetypes import (
+    AlwaysCooperateAgent,
+    AlwaysDefectAgent,
+    GrudgerAgent,
+    HandHistoryEntry,
+    PavlovAgent,
+    PavlovMode,
+    TitForTatAgent,
+    ActionRecord as PdActionRecord,
 )
 from agents.stub_agents import AlwaysCallAgent, AlwaysFoldAgent
 
@@ -26,4 +35,12 @@ __all__ = [
     "MathLevel3Agent",
     "MathLevel4Agent",
     "MathLevel5Agent",
+    "TitForTatAgent",
+    "AlwaysDefectAgent",
+    "AlwaysCooperateAgent",
+    "PavlovAgent",
+    "PavlovMode",
+    "GrudgerAgent",
+    "HandHistoryEntry",
+    "PdActionRecord",
 ]

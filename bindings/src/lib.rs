@@ -383,6 +383,12 @@ fn l4_recommend_py(view: PyHandView) -> PyResult<(String, Option<String>)> {
     )))
 }
 
+#[pyfunction]
+fn estimate_hand_strength_percentile_py(view: PyHandView) -> PyResult<f64> {
+    let state = py_state_to_rust(&view)?;
+    Ok(level1::hand_strength_percentile_pub(&state))
+}
+
 /// Wraps a trained CFRSolver blueprint so Python can hold it across
 /// decisions within a match (training once at construction, not per
 /// decision). A SMALL, fast blueprint to prove the Agent wrapping works
@@ -453,5 +459,7 @@ fn pokerbot_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(l2_recommend_py, m)?)?;
     m.add_function(wrap_pyfunction!(l3_recommend_py, m)?)?;
     m.add_function(wrap_pyfunction!(l4_recommend_py, m)?)?;
+    m.add_function(wrap_pyfunction!(estimate_hand_strength_percentile_py, m)?)?;
+
     Ok(())
 }
