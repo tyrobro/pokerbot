@@ -100,6 +100,10 @@ class TitForTatAgent(Agent):
     def __init__(self, decay: float = 0.85):
         self.decay = decay
         self.match_history: List[HandHistoryEntry] = []
+    
+        
+    def flush(self) -> None:
+        self.match_history = []
 
     def observe_hand_result(self, entry: HandHistoryEntry) -> None:
         self.match_history.append(entry)
@@ -190,6 +194,9 @@ class PavlovAgent(Agent):
         self.mode = PavlovMode.BALANCED
         self.starting_stack = starting_stack
         self.loss_threshold_pct = loss_threshold_pct
+        
+    def flush(self) -> None:
+        self.mode = PavlovMode.BALANCED
 
     def observe_hand_result(self, entry: HandHistoryEntry) -> None:
         self.mode = _pavlov_next_mode(

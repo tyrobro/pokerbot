@@ -1,31 +1,36 @@
 //! PyO3 binding crate: exposes core_engine to Python as pokerbot_core.
-//! Sprint 7 close-out: exposes each math-engine level's recommend() so
-//! Python Agent wrappers (agents/math_agents.py) can complete a full
-//! match via play_match_py, per Sprint 7's own Definition of Done.
-//!
-//! Known gaps (flagged, not silently resolved -- see agents/math_agents.py
-//! module doc for the full explanation):
-//!   - PyHandView carries no action history yet, so L4/L5 run against
-//!     empty/default ObservedActions and hand_log here.
-//!   - L3/L4/L5 use MonteCarloConfig::default() (seed=None) and L5's
-//!     recommend() draws its own unseeded RNG, so matches using these
-//!     agents are NOT reproducible under play_match_py's `seed` param --
-//!     only the deck/button are seeded by it. A real prerequisite for
-//!     Sprint 9's fixed-seed calibration phase, not yet built.
-//!   - L5's PyCFRSolver trains a SMALL, fast blueprint at construction
-//!     time to prove the wrapping works -- NOT the production-scale
-//!     CFRConfig::default() blueprint (Sprint 11-12's offline training
-//!     work, Section 5).
+//! Sprint 9: closes two Sprint 7 preconditions.
+//!   1. L3/L4/L5 Rust calls now take an explicit `seed`, threaded from
+//!      Python (agents/math_agents.py derives a fresh deterministic seed
+//!      per decision from each agent's own base seed) -- MonteCarloConfig
+//!      is never `seed: None` from these entry points anymore.
+//!   2. L4's current-hand opponent actions and L5's hand_log are built
+//!      from the live HandView's new `actions_so_far` field (real data),
+//!      not an always-empty default/Vec::new().
+//! NOT closed this sprint (flagged): L4/L5's own Rust-side
+//! `match_history` field (cross-PAIRING memory inside the equity calls
+//! themselves) stays empty -- only current-hand data is threaded. Cross-
+//! pairing opponent memory IS correctly implemented, but on the Python
+//! side only (PD archetypes' observe_hand_result/flush, orchestrator/
+//! opponent_memory.py), not serialized back into these Rust calls.
+//! Also added: `play_hand_py`, a single-hand binding -- needed so the
+//! Python-side round-robin driver (Sprint 9) can call observe_hand_result
+//! after every hand (Section 4.4), which `play_match_py`'s all-in-one-call
+//! design cannot support.
 
 use core_engine::betting::{ActionType as RustActionType, PotFraction as RustPotFraction};
-use core_engine::card::Card;
-use core_engine::game::{Action as RustAction, HandView as RustHandView, Player, Street};
+use core_engine::card::{Card, Deck};
+use core_engine::game::{
+    play_hand, Action as RustAction, HandConfig, HandView as RustHandView, Player, Street,
+};
 use core_engine::match_engine::{play_match, HandSummary, MatchConfig, MatchResult};
 use core_engine::math_engine::level3::MonteCarloConfig;
-use core_engine::math_engine::level5::{BucketConfig, CFRConfig, CFRSolver, LbrConfig};
+use core_engine::math_engine::level5::{
+    Actor, BucketConfig, CFRConfig, CFRSolver, HandActionLogEntry, LbrConfig,
+};
 use core_engine::math_engine::{
-    level1, level2, level3, level4, MathEngineState as RustMathState, ObservedActions,
-    RecommendedAction,
+    level1, level2, level3, level4, ActionRecord, MathEngineState as RustMathState,
+    ObservedActions, RecommendedAction,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -58,6 +63,11 @@ struct PyHandView {
     is_button: bool,
     #[pyo3(get)]
     street: String,
+    #[pyo3(get)]
+    own_player: String,
+    /// (street, player, action_type, amount, pot_after), in order.
+    #[pyo3(get)]
+    actions_so_far: Vec<(String, String, String, u64, u64)>,
 }
 
 fn cards_to_tuples(cards: &[Card]) -> Vec<(u8, u8)> {
@@ -100,16 +110,11 @@ fn player_to_str(p: Player) -> &'static str {
     }
 }
 
-fn view_to_py(view: &RustHandView) -> PyHandView {
-    PyHandView {
-        own_hole_cards: cards_to_tuples(&view.own_hole_cards),
-        board: cards_to_tuples(&view.board),
-        pot_size: view.pot_size,
-        own_stack: view.own_stack,
-        opponent_stack: view.opponent_stack,
-        bet_to_call: view.bet_to_call,
-        is_button: view.is_button,
-        street: street_to_str(view.street).to_string(),
+fn parse_player(s: &str) -> PyResult<Player> {
+    match s {
+        "A" => Ok(Player::A),
+        "B" => Ok(Player::B),
+        other => Err(PyValueError::new_err(format!("unknown player {other:?}"))),
     }
 }
 
@@ -147,8 +152,43 @@ fn pot_fraction_to_str(frac: RustPotFraction) -> &'static str {
     }
 }
 
-fn call_agent(py: Python<'_>, agent: &PyObject, view: &RustHandView) -> PyResult<RustAction> {
-    let py_view = view_to_py(view);
+fn view_to_py(view: &RustHandView, own_player: Player) -> PyHandView {
+    let actions_so_far = view
+        .actions_so_far
+        .iter()
+        .zip(view.pot_progression_so_far.iter())
+        .map(|(a, &pot_after)| {
+            (
+                street_to_str(a.street).to_string(),
+                player_to_str(a.player).to_string(),
+                action_type_to_str(a.action_type).to_string(),
+                a.amount,
+                pot_after,
+            )
+        })
+        .collect();
+
+    PyHandView {
+        own_hole_cards: cards_to_tuples(&view.own_hole_cards),
+        board: cards_to_tuples(&view.board),
+        pot_size: view.pot_size,
+        own_stack: view.own_stack,
+        opponent_stack: view.opponent_stack,
+        bet_to_call: view.bet_to_call,
+        is_button: view.is_button,
+        street: street_to_str(view.street).to_string(),
+        own_player: player_to_str(own_player).to_string(),
+        actions_so_far,
+    }
+}
+
+fn call_agent(
+    py: Python<'_>,
+    agent: &PyObject,
+    view: &RustHandView,
+    own_player: Player,
+) -> PyResult<RustAction> {
+    let py_view = view_to_py(view, own_player);
     let result = agent.call_method1(py, "decide_action", (py_view,))?;
     let result = result.bind(py);
 
@@ -217,16 +257,10 @@ fn match_result_to_py(py: Python<'_>, result: MatchResult) -> PyResult<PyObject>
 
 #[pyfunction]
 #[pyo3(signature = (
-    agent_a,
-    agent_b,
-    starting_stack = 100_000,
-    initial_small_blind = 50,
-    initial_big_blind = 100,
-    blind_escalation_interval_hands = 20,
-    blind_escalation_multiplier_numerator = 6,
-    blind_escalation_multiplier_denominator = 5,
-    max_hands = 1000,
-    seed = None,
+    agent_a, agent_b, starting_stack = 100_000, initial_small_blind = 50,
+    initial_big_blind = 100, blind_escalation_interval_hands = 20,
+    blind_escalation_multiplier_numerator = 6, blind_escalation_multiplier_denominator = 5,
+    max_hands = 1000, seed = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn play_match_py(
@@ -256,7 +290,7 @@ fn play_match_py(
     let error: RefCell<Option<PyErr>> = RefCell::new(None);
 
     let mut py_agent_a = |view: &RustHandView| -> RustAction {
-        match call_agent(py, &agent_a, view) {
+        match call_agent(py, &agent_a, view, Player::A) {
             Ok(action) => action,
             Err(e) => {
                 if error.borrow().is_none() {
@@ -270,7 +304,7 @@ fn play_match_py(
         }
     };
     let mut py_agent_b = |view: &RustHandView| -> RustAction {
-        match call_agent(py, &agent_b, view) {
+        match call_agent(py, &agent_b, view, Player::B) {
             Ok(action) => action,
             Err(e) => {
                 if error.borrow().is_none() {
@@ -285,15 +319,107 @@ fn play_match_py(
     };
 
     let result = play_match(&config, &mut py_agent_a, &mut py_agent_b);
+    if let Some(e) = error.into_inner() {
+        return Err(e);
+    }
+    match_result_to_py(py, result)
+}
 
+/// Single-hand binding (Sprint 9): needed so the Python-side round-robin
+/// driver can call observe_hand_result (Section 4.4) after every hand,
+/// which play_match_py's all-in-one-call design cannot support.
+#[pyfunction]
+#[pyo3(signature = (agent_a, agent_b, button, small_blind, big_blind, stack_a, stack_b, seed = None))]
+#[allow(clippy::too_many_arguments)]
+fn play_hand_py(
+    py: Python<'_>,
+    agent_a: PyObject,
+    agent_b: PyObject,
+    button: String,
+    small_blind: u64,
+    big_blind: u64,
+    stack_a: u64,
+    stack_b: u64,
+    seed: Option<u64>,
+) -> PyResult<PyObject> {
+    let button_player = parse_player(&button)?;
+    let config = HandConfig {
+        button: button_player,
+        small_blind,
+        big_blind,
+        stack_a,
+        stack_b,
+    };
+    let deck = match seed {
+        Some(s) => Deck::new_seeded(s),
+        None => Deck::new(),
+    };
+
+    let error: RefCell<Option<PyErr>> = RefCell::new(None);
+    let mut py_agent_a = |view: &RustHandView| -> RustAction {
+        match call_agent(py, &agent_a, view, Player::A) {
+            Ok(a) => a,
+            Err(e) => {
+                if error.borrow().is_none() {
+                    *error.borrow_mut() = Some(e);
+                }
+                RustAction {
+                    action_type: RustActionType::Fold,
+                    size: None,
+                }
+            }
+        }
+    };
+    let mut py_agent_b = |view: &RustHandView| -> RustAction {
+        match call_agent(py, &agent_b, view, Player::B) {
+            Ok(a) => a,
+            Err(e) => {
+                if error.borrow().is_none() {
+                    *error.borrow_mut() = Some(e);
+                }
+                RustAction {
+                    action_type: RustActionType::Fold,
+                    size: None,
+                }
+            }
+        }
+    };
+
+    let result = play_hand(&config, deck, &mut py_agent_a, &mut py_agent_b);
     if let Some(e) = error.into_inner() {
         return Err(e);
     }
 
-    match_result_to_py(py, result)
+    let dict = PyDict::new(py);
+    dict.set_item("ended_by_fold", result.ended_by_fold)?;
+    dict.set_item(
+        "winner",
+        result.winner.map(player_to_str).unwrap_or("SPLIT"),
+    )?;
+    dict.set_item("final_stack_a", result.final_stack_a)?;
+    dict.set_item("final_stack_b", result.final_stack_b)?;
+    dict.set_item("pot_awarded", result.pot_awarded)?;
+    dict.set_item("hole_a", cards_to_tuples(&result.hole_a))?;
+    dict.set_item("hole_b", cards_to_tuples(&result.hole_b))?;
+    dict.set_item("board", cards_to_tuples(&result.board))?;
+    let actions: PyResult<Vec<PyObject>> = result
+        .actions
+        .iter()
+        .map(|a| -> PyResult<PyObject> {
+            let d = PyDict::new(py);
+            d.set_item("street", street_to_str(a.street))?;
+            d.set_item("player", player_to_str(a.player))?;
+            d.set_item("action_type", action_type_to_str(a.action_type))?;
+            d.set_item("amount", a.amount)?;
+            Ok(d.into_any().unbind())
+        })
+        .collect();
+    dict.set_item("actions", actions?)?;
+    dict.set_item("pot_progression", result.pot_progression.clone())?;
+    Ok(dict.into_any().unbind())
 }
 
-// ---- Sprint 7 close-out: math-engine level recommend() bindings ----
+// ---- math-engine level recommend() bindings ----
 
 fn py_state_to_rust(view: &PyHandView) -> PyResult<RustMathState> {
     if view.own_hole_cards.len() != 2 {
@@ -329,10 +455,59 @@ fn py_state_to_rust(view: &PyHandView) -> PyResult<RustMathState> {
     })
 }
 
-/// Converts a RecommendedAction into (kind, size) for Python. "CHECKORCALL"
-/// is deliberately left ambiguous between CHECK/CALL -- the Python side
-/// (agents/math_agents.py's _translate) resolves it against the live
-/// bet_to_call, same pattern as the Sprint 5 stub agents.
+/// Builds ObservedActions.current_hand_actions from the live view's
+/// actions_so_far, filtered to the OPPONENT's actions only (L4's
+/// ObservedActions contract). pot_size_at_time uses the pot AFTER the
+/// action (an approximation, flagged -- not the pot immediately before
+/// it, which would need one more field threaded through).
+/// match_history stays empty -- NOT closed this sprint (see module doc).
+fn build_observed_actions(view: &PyHandView) -> PyResult<ObservedActions> {
+    let own_player = parse_player(&view.own_player)?;
+    let mut current_hand_actions = Vec::new();
+    for (street_s, player_s, action_s, amount, pot_after) in &view.actions_so_far {
+        let player = parse_player(player_s)?;
+        if player == own_player {
+            continue;
+        }
+        current_hand_actions.push(ActionRecord {
+            street: parse_street(street_s)?,
+            action_type: parse_action_type(action_s)?,
+            amount: *amount,
+            pot_size_at_time: *pot_after,
+        });
+    }
+    Ok(ObservedActions {
+        current_hand_actions,
+        match_history: Vec::new(),
+    })
+}
+
+/// Builds L5's full-hand (both players') action log from the live view's
+/// actions_so_far -- closes the "confidently wrong InfoSetKey" gap
+/// flagged at the end of Sprint 7 (hand_log is no longer always empty).
+fn build_hand_log(view: &PyHandView) -> PyResult<Vec<HandActionLogEntry>> {
+    let own_player = parse_player(&view.own_player)?;
+    let mut log = Vec::new();
+    for (street_s, player_s, action_s, amount, pot_after) in &view.actions_so_far {
+        let player = parse_player(player_s)?;
+        let actor = if player == own_player {
+            Actor::Own
+        } else {
+            Actor::Opponent
+        };
+        log.push(HandActionLogEntry {
+            actor,
+            record: ActionRecord {
+                street: parse_street(street_s)?,
+                action_type: parse_action_type(action_s)?,
+                amount: *amount,
+                pot_size_at_time: *pot_after,
+            },
+        });
+    }
+    Ok(log)
+}
+
 fn recommended_to_py(action: RecommendedAction) -> (String, Option<String>) {
     match action {
         RecommendedAction::Fold => ("FOLD".to_string(), None),
@@ -358,26 +533,34 @@ fn l2_recommend_py(view: PyHandView) -> PyResult<(String, Option<String>)> {
     Ok(recommended_to_py(level2::recommend(&state, &config)))
 }
 
+/// Sprint 9: now takes an explicit `seed` -- threaded from Python's
+/// per-agent deterministic counter, never MonteCarloConfig::default()'s
+/// seed=None.
 #[pyfunction]
-fn l3_recommend_py(view: PyHandView) -> PyResult<(String, Option<String>)> {
+fn l3_recommend_py(view: PyHandView, seed: u64) -> PyResult<(String, Option<String>)> {
     let state = py_state_to_rust(&view)?;
     let threshold = level3::ThresholdConfig::default();
-    let mc = MonteCarloConfig::default();
+    let mc = MonteCarloConfig {
+        trials: 2000,
+        seed: Some(seed),
+    };
     Ok(recommended_to_py(level3::recommend(
         &state, &threshold, &mc,
     )))
 }
 
+/// Sprint 9: seeded, AND now reads real current-hand opponent actions
+/// via build_observed_actions (previously always ObservedActions::default()).
 #[pyfunction]
-fn l4_recommend_py(view: PyHandView) -> PyResult<(String, Option<String>)> {
+fn l4_recommend_py(view: PyHandView, seed: u64) -> PyResult<(String, Option<String>)> {
     let state = py_state_to_rust(&view)?;
-    // Known gap (see module doc): no action history threaded from
-    // Python yet, so this always runs ObservedActions::default() --
-    // degenerates to the already-tested "no observed actions" case.
-    let observed = ObservedActions::default();
+    let observed = build_observed_actions(&view)?;
     let threshold = level4::ThresholdConfig::default();
     let range = level4::RangeConfig::default();
-    let mc = MonteCarloConfig::default();
+    let mc = MonteCarloConfig {
+        trials: 2000,
+        seed: Some(seed),
+    };
     Ok(recommended_to_py(level4::recommend(
         &state, &observed, &threshold, &range, &mc,
     )))
@@ -389,11 +572,6 @@ fn estimate_hand_strength_percentile_py(view: PyHandView) -> PyResult<f64> {
     Ok(level1::hand_strength_percentile_pub(&state))
 }
 
-/// Wraps a trained CFRSolver blueprint so Python can hold it across
-/// decisions within a match (training once at construction, not per
-/// decision). A SMALL, fast blueprint to prove the Agent wrapping works
-/// -- not the production-scale CFRConfig::default() blueprint (Sprint
-/// 11-12's offline training work).
 #[pyclass]
 struct PyCFRSolver {
     inner: CFRSolver,
@@ -402,13 +580,7 @@ struct PyCFRSolver {
 #[pymethods]
 impl PyCFRSolver {
     #[new]
-    #[pyo3(signature = (
-        num_buckets = 6,
-        bucketing_trials = 50,
-        max_raises_per_street = 1,
-        seed = 1,
-        train_iterations = 50,
-    ))]
+    #[pyo3(signature = (num_buckets = 6, bucketing_trials = 50, max_raises_per_street = 1, seed = 1, train_iterations = 50))]
     fn new(
         num_buckets: u8,
         bucketing_trials: u32,
@@ -428,16 +600,17 @@ impl PyCFRSolver {
         PyCFRSolver { inner }
     }
 
-    /// Known gap (see module doc): hand_log is always empty (no action
-    /// history threaded from Python yet) and this draws its own
-    /// unseeded RNG -- NOT reproducible under a match's own seed.
-    fn recommend(&self, view: PyHandView) -> PyResult<(String, Option<String>)> {
+    /// Sprint 9: `seed` is now required (threaded from Python), and
+    /// hand_log/observed are built from the live view's real
+    /// actions_so_far (previously always empty).
+    fn recommend(&self, view: PyHandView, seed: u64) -> PyResult<(String, Option<String>)> {
         let state = py_state_to_rust(&view)?;
-        let observed = ObservedActions::default();
-        let mut rng = StdRng::seed_from_u64(rand::random::<u64>());
+        let observed = build_observed_actions(&view)?;
+        let hand_log = build_hand_log(&view)?;
+        let mut rng = StdRng::seed_from_u64(seed);
         let action = core_engine::math_engine::level5::l5_recommend(
             &state,
-            &[],
+            &hand_log,
             &observed,
             &self.inner,
             &mut rng,
@@ -455,11 +628,11 @@ fn pokerbot_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCFRSolver>()?;
     m.add_function(wrap_pyfunction!(ping, m)?)?;
     m.add_function(wrap_pyfunction!(play_match_py, m)?)?;
+    m.add_function(wrap_pyfunction!(play_hand_py, m)?)?;
     m.add_function(wrap_pyfunction!(l1_recommend_py, m)?)?;
     m.add_function(wrap_pyfunction!(l2_recommend_py, m)?)?;
     m.add_function(wrap_pyfunction!(l3_recommend_py, m)?)?;
     m.add_function(wrap_pyfunction!(l4_recommend_py, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_hand_strength_percentile_py, m)?)?;
-
     Ok(())
 }

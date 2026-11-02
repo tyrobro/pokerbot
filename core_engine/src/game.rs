@@ -43,6 +43,13 @@ pub struct HandView {
     pub bet_to_call: u64,
     pub is_button: bool,
     pub street: Street,
+    /// Both players' actions so far THIS hand, in order (Section 4.3's
+    /// "full betting-action sequence for the CURRENT hand"). Added
+    /// Sprint 9 to close the L5 hand_log / L4 current-hand-actions gap
+    /// flagged at the end of Sprint 7.
+    pub actions_so_far: Vec<ActionLogEntry>,
+    /// Pot size after each entry in actions_so_far, index-aligned.
+    pub pot_progression_so_far: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -382,6 +389,8 @@ pub fn play_hand(
                     bet_to_call,
                     is_button: acting == config.button,
                     street,
+                    actions_so_far: action_log.clone(),
+                    pot_progression_so_far: pot_progression.clone(),
                 };
 
                 let action = if acting == Player::A {
