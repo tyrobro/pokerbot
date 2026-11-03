@@ -1,5 +1,5 @@
 use core_engine::play_hand;
-use core_engine::{Action, ActionType, Deck, HandConfig, HandView, Player, Street};
+use core_engine::{Action, ActionType, Deck, HandConfig, HandView, Player, Street, PotFraction};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -124,4 +124,42 @@ fn fold_on_first_action_awards_pot_to_opponent() {
     assert_eq!(result.final_stack_b, 99_900 + 150);
     assert_eq!(result.final_stack_a, 99_950); // A only lost the SB
     assert_eq!(result.final_stack_a + result.final_stack_b, 200_000);
+}
+
+/// Regression test for a real bug found during Sprint 9 calibration: once
+/// one player is all-in (stack 0), the other player could keep legally
+/// re-raising against an opponent who can never respond, looping the
+/// betting round indefinitely. This hand forces exactly that shape: B
+/// starts with a tiny stack, A always raises -- the hand must still
+/// terminate promptly once B is capped.
+#[test]
+fn hand_terminates_when_opponent_is_capped_all_in_and_other_player_keeps_raising() {
+    let config = HandConfig {
+        button: Player::A,
+        small_blind: 50,
+        big_blind: 100,
+        stack_a: 100_000,
+        stack_b: 300, // tiny -- will be all-in almost immediately
+    };
+    let deck = Deck::new_seeded(21);
+
+    let mut agent_a = |view: &HandView| {
+        if view.bet_to_call == 0 {
+            Action {
+                action_type: ActionType::Raise,
+                size: Some(PotFraction::Full),
+            }
+        } else {
+            Action {
+                action_type: ActionType::Raise,
+                size: Some(PotFraction::Full),
+            }
+        }
+    };
+    let mut agent_b = always_check_call;
+
+    // The test itself is the assertion: this must return at all (previously
+    // it would loop past the 1000-action safety cap and panic).
+    let result = play_hand(&config, deck, &mut agent_a, &mut agent_b);
+    assert_eq!(result.final_stack_a + result.final_stack_b, 100_300);
 }

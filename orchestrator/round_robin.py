@@ -29,6 +29,8 @@ def play_leg(agent_a, agent_b, leg: int, config: dict) -> dict:
     hand_number = 0
 
     while hand_number < config["max_hands"] and stack_a > 0 and stack_b > 0:
+        if hand_number % 10 == 0:
+            print(f"      hand {hand_number}/{config['max_hands']} (stacks: {stack_a}, {stack_b})...", flush=True)
         sb, bb = blinds_for_hand(
             config["initial_small_blind"], config["initial_big_blind"], hand_number,
             config["blind_escalation_interval_hands"],
@@ -112,6 +114,7 @@ def run_round_robin(agent_factories: dict, config: dict, logs_dir="logs") -> lis
     base_seed = config.get("seed") or 0
     results = []
     for idx, (a_id, b_id) in enumerate(pairings):
+        print(f"  [{idx + 1}/{len(pairings)}] {a_id} vs {b_id}...", flush=True)
         agent_a = agent_factories[a_id](base_seed + idx * 2)
         agent_b = agent_factories[b_id](base_seed + idx * 2 + 1)
         results.append(play_pairing(agent_a, agent_b, a_id, b_id, config, logs_dir))

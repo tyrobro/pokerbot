@@ -350,8 +350,17 @@ pub fn play_hand(
             let mut acted: [bool; 2] = [false, false];
             let mut last_raise_increment = config.big_blind;
             let mut idx = 0usize;
+            let mut actions_this_round = 0u32;
+            const MAX_ACTIONS_PER_BETTING_ROUND: u32 = 1000;
 
             loop {
+                actions_this_round += 1;
+                assert!(
+                    actions_this_round < MAX_ACTIONS_PER_BETTING_ROUND,
+                    "betting round exceeded {MAX_ACTIONS_PER_BETTING_ROUND} actions -- likely an \
+                     unbounded raise loop; check resolve_raise's min-raise enforcement"
+                );
+
                 let acting = order[idx % 2];
                 let (acting_stack, acting_committed) = read_stacks(
                     acting,
@@ -370,7 +379,21 @@ pub fn play_hand(
 
                 if acting_stack == 0 {
                     acted[player_idx(acting)] = true;
-                    if acted[0] && acted[1] && street_committed_a == street_committed_b {
+                    // Bug fix (found via the Sprint 9 node-visit-style
+                    // safety cap firing): this skip branch's break
+                    // condition was missing `either_all_in`, unlike the
+                    // normal action branch below. Without it, the
+                    // non-capped player could keep legally re-raising
+                    // against an opponent who can never respond (already
+                    // all-in at 0 stack), resetting `acted` every time
+                    // and preventing this branch's narrower condition
+                    // from ever being satisfied -- an unbounded betting
+                    // round.
+                    let either_all_in = stack_a == 0 || stack_b == 0;
+                    if acted[0]
+                        && acted[1]
+                        && (street_committed_a == street_committed_b || either_all_in)
+                    {
                         break;
                     }
                     idx += 1;
