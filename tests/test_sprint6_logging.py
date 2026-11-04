@@ -74,3 +74,16 @@ def test_logged_leg_roundtrips_through_parquet_and_matches_csv(tmp_path):
         for key, value in row.items():
             # CSV values come back as strings; compare stringified.
             assert csv_rows[i][key] == str(value), f"CSV mismatch at row {i}, col {key}"
+            
+def test_append_pairing_summary_overwrites_not_duplicates(tmp_path):
+    from orchestrator.logging import append_pairing_summary
+    import pandas as pd
+
+    logs_dir = str(tmp_path)
+    append_pairing_summary("x", "y", 0.1, -0.1, 0.1, -0.1, 0.2, -0.2, logs_dir)
+    # Re-score the SAME pairing (simulating a re-run) with different numbers.
+    append_pairing_summary("x", "y", 0.5, -0.5, 0.5, -0.5, 1.0, -1.0, logs_dir)
+
+    df = pd.read_parquet(f"{logs_dir}/pairings_summary.parquet")
+    assert len(df) == 1, "re-scoring the same pairing should replace, not duplicate, the row"
+    assert df.iloc[0]["pairing_score_a"] == 1.0

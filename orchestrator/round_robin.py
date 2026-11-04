@@ -38,7 +38,11 @@ def play_leg(agent_a, agent_b, leg: int, config: dict) -> dict:
         hand_seed = None if seed_base is None else seed_base + hand_number * 7919 + leg
 
         stack_a_before, stack_b_before = stack_a, stack_b
-        result = pokerbot_core.play_hand_py(agent_a, agent_b, button, sb, bb, stack_a, stack_b, hand_seed)
+        try:
+            result = pokerbot_core.play_hand_py(agent_a, agent_b, button, sb, bb, stack_a, stack_b, hand_seed)
+        except Exception as e:
+            print(f"      !! hand {hand_number} raised: {type(e).__name__}: {e}", flush=True)
+            raise
         stack_a, stack_b = result["final_stack_a"], result["final_stack_b"]
 
         entry_a, entry_b = build_hand_history_entries(result)

@@ -143,8 +143,13 @@ def append_pairing_summary(
     pairing_score_b: float,
     logs_dir: str = "logs",
 ) -> str:
-    """Appends one row to the top-level pairings_summary.parquet (Section
-    6.2) aggregating final scores per pairing for fast analysis."""
+    """Upserts one row into the top-level pairings_summary.parquet
+    (Section 6.2): replaces any existing row for this (agent_a_id,
+    agent_b_id) pairing rather than appending a duplicate, so re-running
+    a round-robin (e.g. during debugging) doesn't silently accumulate
+    multiple rows per pairing. Found via a Sprint 10 dashboard bug: bars
+    of very different, non-9 lengths for a 10-agent field, caused by
+    exactly this duplication across repeated calibration runs."""
     path = Path(logs_dir) / "pairings_summary.parquet"
     row = {
         "agent_a_id": agent_a_id,
@@ -160,6 +165,9 @@ def append_pairing_summary(
 
     if path.exists():
         existing = pd.read_parquet(path)
+        existing = existing[
+            ~((existing["agent_a_id"] == agent_a_id) & (existing["agent_b_id"] == agent_b_id))
+        ]
         combined = pd.concat([existing, new_df], ignore_index=True)
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
