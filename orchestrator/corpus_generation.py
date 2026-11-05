@@ -104,6 +104,10 @@ def generate_one_match(unit: dict, shards_dir: str) -> dict:
 
     return {"unit_id": unit["unit_id"], "hands": len(rows), "shard_path": str(shard_path)}
 
+def _generate_one_match_star(args: tuple) -> dict:
+    unit, shards_dir = args
+    return generate_one_match(unit, shards_dir)
+
 
 def run_corpus_generation(
     output_dir: str,
@@ -134,14 +138,25 @@ def run_corpus_generation(
     completed_this_run = 0
     total_hands_this_run = 0
 
+    print(f"Starting pool with {processes or 'default'} processes...", flush=True)
+
     with multiprocessing.Pool(processes=processes) as pool:
-        for result in pool.starmap(generate_one_match, worker_args, chunksize=1):
+        # imap_unordered streams results back AS EACH ONE FINISHES,
+        # unlike starmap (which blocks until the ENTIRE list is done
+        # before the for-loop sees anything -- that was the actual bug:
+        # not a hang, just zero visible progress/manifest writes until
+        # all 750 units completed, which with L5's per-match CFR
+        # training could be a very long silent wait).
+        for result in pool.imap_unordered(_generate_one_match_star, worker_args, chunksize=1):
             _append_completed(manifest_path, result["unit_id"])
             completed_this_run += 1
             total_hands_this_run += result["hands"]
-            if completed_this_run % 10 == 0:
-                print(f"  [{completed_this_run}/{len(pending)}] completed, {total_hands_this_run} hands so far this run...", flush=True)
-
+            print(
+                f"  [{completed_this_run}/{len(pending)}] {result['unit_id']} done "
+                f"({result['hands']} hands, {total_hands_this_run} total this run)...",
+                flush=True,
+            )
+                        
     return {
         "total_units": len(all_units),
         "completed_this_run": completed_this_run,
