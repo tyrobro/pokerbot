@@ -145,6 +145,7 @@ def build_dashboard_html(pairings_summary_path: str, output_path: str, leaderboa
     table_fig = _leaderboard_table(leaderboard)
     bar_fig = _win_loss_bar(leaderboard)
     matrix_fig = _head_to_head_heatmap(matrix, df)
+    
     parts = [
         "<html><head><title>Tournament Dashboard</title>",
         "<style>body{font-family:sans-serif;max-width:1100px;margin:30px auto;padding:0 20px;}"
@@ -172,6 +173,5 @@ def build_dashboard_html(pairings_summary_path: str, output_path: str, leaderboa
         "</body></html>",
     ]
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(parts))
