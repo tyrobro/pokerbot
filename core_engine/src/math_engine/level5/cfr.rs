@@ -59,7 +59,7 @@ use std::collections::BTreeMap;
 /// match exactly, not use separate tighter/looser values).
 const SAFETY_CAP_PER_STREET: u16 = 4;
 
-const TRAIN_NODE_VISIT_BUDGET: u64 = 5_000_000;
+const TRAIN_NODE_VISIT_BUDGET: u64 = 200_000_000;
 const LBR_NODE_VISIT_BUDGET: u64 = 2_000_000;
 
 /// Normalized per-player stack cap for this simplified stake model (not

@@ -42,9 +42,25 @@ pub struct CFRConfig {
 
 impl Default for CFRConfig {
     fn default() -> Self {
+        // Sprint 14 calibration finding: max_raises_per_street=3 (the
+        // PRD's originally-stated default) is tractable in principle at
+        // low iteration counts (30 iters: ~103s, 100 iters: ~750s, 300
+        // iters: ~2733s) but OOM-crashes at 1000 iterations -- a hard
+        // memory ceiling, not a soft performance tradeoff. Per-iteration
+        // cost at raises=3 is also ~9-10x that of raises=2 (0.32-0.4s/
+        // iter at raises=2 vs ~3.4s/iter at raises=3, both at 10
+        // buckets). Changed the default to 2, which trains cleanly
+        // through 1000 iterations (~1561s) with no memory issues and
+        // roughly linear-ish scaling throughout. Sprint 15+ follow-up,
+        // not resolved here: whether raises=3's extra depth would
+        // produce meaningfully stronger play if the OOM were fixed
+        // (e.g. a more memory-efficient info-set representation) is an
+        // open question, not answered by this finding -- this is a
+        // tractability constraint, not a claim that 2 is strategically
+        // sufficient.
         CFRConfig {
             buckets: BucketConfig::default(),
-            max_raises_per_street: 3,
+            max_raises_per_street: 2,
         }
     }
 }
