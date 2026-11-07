@@ -57,3 +57,14 @@ def test_split_by_match_covers_every_completed_unit_exactly_once(tmp_path):
     split = split_corpus_by_match(output_dir, val_fraction=0.2, seed=7)
     assert split["train_matches"] + split["val_matches"] == 15 * 2
     assert split["val_matches"] > 0  # non-trivial split at this size
+    
+def test_per_pairing_overrides_only_affects_specified_pairings():
+    overrides = {("l3", "l3"): 5}
+    units = build_work_units(matches_per_pairing=2, base_seed=1, max_hands=5, starting_stack=100_000, per_pairing_overrides=overrides)
+
+    l3_l3_units = [u for u in units if u["agent_a"] == "l3" and u["agent_b"] == "l3"]
+    other_units = [u for u in units if not (u["agent_a"] == "l3" and u["agent_b"] == "l3")]
+
+    assert len(l3_l3_units) == 5  # overridden
+    assert all(len([u for u in other_units if u["agent_a"] == a and u["agent_b"] == b]) == 2
+               for a, b in {(u["agent_a"], u["agent_b"]) for u in other_units})

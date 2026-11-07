@@ -37,14 +37,34 @@ _AGENT_FACTORIES = {
 }
 
 
-def build_work_units(matches_per_pairing: int, base_seed: int, max_hands: int, starting_stack: int) -> list:
+def build_work_units(
+    matches_per_pairing: int,
+    base_seed: int,
+    max_hands: int,
+    starting_stack: int,
+    per_pairing_overrides: dict = None,
+) -> list:
     """One unit per (pairing, match index). Pairings include mirror
     matchups (e.g. l3 vs l3) -- a level playing itself is still useful
-    self-play signal, not excluded by Section 5's wording."""
+    self-play signal, not excluded by Section 5's wording.
+
+    `per_pairing_overrides`: optional dict mapping (level_a, level_b) ->
+    match count, overriding `matches_per_pairing` for just that pairing.
+    Used for the Sprint 11 top-up (L3/L4/L5-involving pairings produced
+    far fewer HANDS than L1/L2-involving ones at equal MATCH counts,
+    since stronger/more-aggressive levels bust each other much faster --
+    this lets us request more matches specifically for the thin
+    pairings without regenerating the already-adequate ones. unit_ids
+    here are identical in scheme to a plain uniform run, so increasing a
+    pairing's count is purely additive against the existing manifest --
+    already-completed lower-index units for that pairing are unaffected
+    and skipped as usual by run_corpus_generation's resumability check."""
     units = []
+    overrides = per_pairing_overrides or {}
     pairings = list(itertools.combinations_with_replacement(MATH_LEVELS, 2))
     for pairing_idx, (a, b) in enumerate(pairings):
-        for match_idx in range(matches_per_pairing):
+        count = overrides.get((a, b), matches_per_pairing)
+        for match_idx in range(count):
             unit_id = f"{a}_vs_{b}__m{match_idx}"
             units.append(
                 {
@@ -57,14 +77,6 @@ def build_work_units(matches_per_pairing: int, base_seed: int, max_hands: int, s
                 }
             )
     return units
-
-
-def _load_completed(manifest_path: Path) -> set:
-    if not manifest_path.exists():
-        return set()
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        return {line.strip() for line in f if line.strip()}
-
 
 def _append_completed(manifest_path: Path, unit_id: str) -> None:
     # Append-only, flushed immediately -- this line being written IS the
@@ -108,6 +120,11 @@ def _generate_one_match_star(args: tuple) -> dict:
     unit, shards_dir = args
     return generate_one_match(unit, shards_dir)
 
+def _load_completed(manifest_path: Path) -> set:
+    if not manifest_path.exists():
+        return set()
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        return {line.strip() for line in f if line.strip()}
 
 def run_corpus_generation(
     output_dir: str,
@@ -116,6 +133,7 @@ def run_corpus_generation(
     starting_stack: int = 100_000,
     base_seed: int = 1,
     processes: int = None,
+    per_pairing_overrides: dict = None,
 ) -> dict:
     """Builds work units, skips already-completed ones (manifest-based
     resumability), distributes the rest across a process pool. Returns a
@@ -125,7 +143,7 @@ def run_corpus_generation(
     shards_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = Path(output_dir) / "manifest.txt"
 
-    all_units = build_work_units(matches_per_pairing, base_seed, max_hands, starting_stack)
+    all_units = build_work_units(matches_per_pairing, base_seed, max_hands, starting_stack, per_pairing_overrides)
     completed = _load_completed(manifest_path)
     pending = [u for u in all_units if u["unit_id"] not in completed]
 
@@ -141,12 +159,6 @@ def run_corpus_generation(
     print(f"Starting pool with {processes or 'default'} processes...", flush=True)
 
     with multiprocessing.Pool(processes=processes) as pool:
-        # imap_unordered streams results back AS EACH ONE FINISHES,
-        # unlike starmap (which blocks until the ENTIRE list is done
-        # before the for-loop sees anything -- that was the actual bug:
-        # not a hang, just zero visible progress/manifest writes until
-        # all 750 units completed, which with L5's per-match CFR
-        # training could be a very long silent wait).
         for result in pool.imap_unordered(_generate_one_match_star, worker_args, chunksize=1):
             _append_completed(manifest_path, result["unit_id"])
             completed_this_run += 1
@@ -156,7 +168,7 @@ def run_corpus_generation(
                 f"({result['hands']} hands, {total_hands_this_run} total this run)...",
                 flush=True,
             )
-                        
+
     return {
         "total_units": len(all_units),
         "completed_this_run": completed_this_run,
