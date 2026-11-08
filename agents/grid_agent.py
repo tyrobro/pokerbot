@@ -19,7 +19,21 @@ _MATH_RECOMMEND = {
 
 
 class GridAgent(Agent):
-    def __init__(self, math_level: int, ml_level: int, seed: int = 1, onnx_dir: str = "ml/onnx"):
+    def __init__(
+        self,
+        math_level: int,
+        ml_level: int,
+        seed: int = 1,
+        onnx_dir: str = "ml/onnx",
+        shared_l5_solver=None,
+    ):
+        """shared_l5_solver: REQUIRED when math_level == 5. Pass a single
+        pretrained PyCFRSolver (see ml/blueprint_store.py) shared across
+        every GridAgent(5,*) and AlwaysCooperateAgent instance -- Section
+        4.4's fresh-per-pairing requirement is about opponent memory, not
+        the trained blueprint itself (Sprint 14 fix; the original
+        per-instance training here was a real bug caught before the full
+        30-agent round-robin depended on it)."""
         if not 1 <= math_level <= 5:
             raise ValueError("math_level must be 1-5")
         if not 1 <= ml_level <= 5:
@@ -35,12 +49,12 @@ class GridAgent(Agent):
 
             self._math_agent = (MathLevel3Agent if math_level == 3 else MathLevel4Agent)(seed=seed)
         elif math_level == 5:
-            from agents.math_agents import MathLevel5Agent
-
-            self._math_agent = MathLevel5Agent(seed=seed, train_iterations=30)
+            if shared_l5_solver is None:
+                raise ValueError("GridAgent(math_level=5, ...) requires shared_l5_solver")
+            self._l5_solver = shared_l5_solver
         else:
             self._math_agent = None  # L1/L2 use the stateless functions above
-
+            
     def observe_hand_result(self, entry) -> None:
         self._opponent_actions = []  # Section 4.4: fresh per hand within a match is NOT right --
         # actually this resets per HAND; cross-hand memory for ML read-in is Sprint 9's
@@ -50,6 +64,10 @@ class GridAgent(Agent):
     def decide_action(self, state):
         if self.math_level in (1, 2):
             kind, size = _MATH_RECOMMEND[self.math_level](state)
+            baseline = _translate(kind, size, state.bet_to_call)
+        elif self.math_level == 5:
+            kind, size = self._l5_solver.recommend(state, self._next_seed)
+            self._next_seed += 1
             baseline = _translate(kind, size, state.bet_to_call)
         else:
             baseline = self._math_agent.decide_action(state)

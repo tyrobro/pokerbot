@@ -33,21 +33,30 @@ def test_action_scalar_round_trip_for_each_tier():
         assert action_to_scalar(recovered) == pytest.approx(scalar)
 
 
+@pytest.fixture(scope="module")
+def shared_l5_solver_for_grid_tests():
+    import pokerbot_core
+    return pokerbot_core.PyCFRSolver(
+        num_buckets=4, bucketing_trials=20, max_raises_per_street=1, seed=1, train_iterations=20
+    )
+
+
 @pytest.mark.parametrize("math_level", [1, 2, 3, 4, 5])
-@pytest.mark.parametrize("ml_level", [1, 2, 3, 4, 5])  # ML 3-5 need trained ONNX models -- see below
-def test_grid_agent_instantiates_and_completes_a_match_ml_rule_based(math_level, ml_level):
-    agent = GridAgent(math_level=math_level, ml_level=ml_level, seed=math_level * 10 + ml_level)
+@pytest.mark.parametrize("ml_level", [1, 2, 3, 4, 5])  # full grid -- ONNX models now exist (Sprint 12 trained)
+def test_grid_agent_instantiates_and_completes_a_match_ml_rule_based(math_level, ml_level, shared_l5_solver_for_grid_tests):
+    kwargs = {"shared_l5_solver": shared_l5_solver_for_grid_tests} if math_level == 5 else {}
+    agent = GridAgent(math_level=math_level, ml_level=ml_level, seed=math_level * 10 + ml_level, **kwargs)
     result = run_match(agent, AlwaysCallAgent(), seed=1, max_hands=5, blind_escalation_interval_hands=0)
     assert result["final_stack_a"] + result["final_stack_b"] == 200_000
 
-
-def test_corner_cases_produce_well_formed_results():
+def test_corner_cases_produce_well_formed_results(shared_l5_solver_for_grid_tests):
     # (5,1), (1,5), (5,5), (1,1) -- Sprint 13 DoD's named corners.
     # Exploratory per the DoD's own wording ("documented, not necessarily
     # correct") -- this just confirms each one runs and returns sane data.
     corners = [(5, 1), (1, 5), (5, 5), (1, 1)]
     for math_level, ml_level in corners:
-        agent = GridAgent(math_level=math_level, ml_level=ml_level, seed=1)
+        kwargs = {"shared_l5_solver": shared_l5_solver_for_grid_tests} if math_level == 5 else {}
+        agent = GridAgent(math_level=math_level, ml_level=ml_level, seed=1, **kwargs)
         result = run_match(agent, AlwaysCallAgent(), seed=2, max_hands=5, blind_escalation_interval_hands=0)
         assert result["hands_played"] > 0
         assert result["final_stack_a"] + result["final_stack_b"] == 200_000

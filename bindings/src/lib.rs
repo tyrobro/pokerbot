@@ -608,6 +608,24 @@ impl PyCFRSolver {
         let observed = build_observed_actions(&view)?;
         let hand_log = build_hand_log(&view)?;
         let mut rng = StdRng::seed_from_u64(seed);
+        // Real bug found via Sprint 14's GridAgent(5,1)-vs-AlwaysCooperate
+        // equivalence test: the exact mismatch changed between otherwise
+        // identical test runs (102600/103050, then 103050/103725) --
+        // the signature of genuine non-determinism, not a fixed logic
+        // bug. Root cause: l5_recommend's unseen-InfoSetKey fallback
+        // chain can bottom out at L4's range-vs-range safety net (Sprint
+        // 7), which needs its own MonteCarloConfig -- and this call was
+        // passing MonteCarloConfig::default() (seed: None), drawing
+        // unseeded OS entropy every time the fallback fires. Seeded here
+        // from the same `seed` parameter (offset to avoid exact
+        // correlation with the main rng stream) so EVERY RNG draw inside
+        // one recommend() call is fully deterministic, closing a real
+        // gap in the Sprint 9 seeding work that this call site was
+        // missed by.
+        let fallback_mc_config = MonteCarloConfig {
+            trials: 2000,
+            seed: Some(seed.wrapping_add(1)),
+        };
         let action = core_engine::math_engine::level5::l5_recommend(
             &state,
             &hand_log,
@@ -616,7 +634,7 @@ impl PyCFRSolver {
             &mut rng,
             &level4::ThresholdConfig::default(),
             &level4::RangeConfig::default(),
-            &MonteCarloConfig::default(),
+            &fallback_mc_config,
         );
         Ok(recommended_to_py(action))
     }

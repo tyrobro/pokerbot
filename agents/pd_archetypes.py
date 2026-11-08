@@ -140,12 +140,25 @@ class AlwaysDefectAgent(Agent):
 
 # ---- Always-Cooperate: GTO-pure, direct L5 reuse ----
 
-class AlwaysCooperateAgent(MathLevel5Agent):
+class AlwaysCooperateAgent(Agent):
     """Section 4.2: "reuses the math-engine level-5 solver standalone,
-    never adapts." Direct reuse of MathLevel5Agent (Sprint 7) -- see that
-    class's docstring for the Sprint-7-scope blueprint caveat (a small,
-    fast training config, not the production-scale CFRConfig::default()
-    blueprint, Sprint 11-12's offline work)."""
+    never adapts." Sprint 14: shares the SAME pretrained blueprint as
+    every GridAgent(5,*) instance (not its own separately-trained copy)
+    -- this makes AlwaysCooperate and GridAgent(5,1) behaviorally
+    IDENTICAL by construction (GridAgent(5,1) has confidence_weight(1)=0,
+    i.e. pure L5 baseline with zero ML deviation -- PRD-author-identified
+    free correctness check: if these two ever score meaningfully
+    differently in round-robin results, something is wrong with either
+    the confidence-weight plumbing or this wrapping)."""
+
+    def __init__(self, shared_l5_solver, seed: int = 1):
+        self._l5_solver = shared_l5_solver
+        self._next_seed = seed
+
+    def decide_action(self, state) -> Action:
+        kind, size = self._l5_solver.recommend(state, self._next_seed)
+        self._next_seed += 1
+        return _translate(kind, size, state.bet_to_call)
 
 
 # ---- Pavlov: win-stay / lose-shift ----
