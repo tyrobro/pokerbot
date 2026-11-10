@@ -77,6 +77,7 @@ def test_always_cooperate_completes_a_full_match():
     agent = AlwaysCooperateAgent(shared_l5_solver=solver, seed=1)
     result = run_match(agent, MathLevel1Agent(), seed=1, max_hands=5, blind_escalation_interval_hands=0)
     assert result["final_stack_a"] + result["final_stack_b"] == 200_000
+    
 # ---- Pavlov ----
 
 def test_pavlov_switches_mode_after_a_big_loss():
