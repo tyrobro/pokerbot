@@ -17,6 +17,22 @@ from pathlib import Path
 from agents.roster import all_agent_ids, build_agent
 from orchestrator.round_robin import play_pairing
 
+# Real concurrency bug found during Sprint 15's actual run: multiple
+# worker processes calling append_pairing_summary (read-entire-file,
+# modify, overwrite-entire-file) with NO locking corrupted the shared
+# pairings_summary.parquet when two workers' writes raced -- the file
+# became unreadable (Parquet thrift deserialize error) partway through
+# a run that had already logged hundreds of hands correctly. Fixed with
+# a cross-process Lock, shared via the pool's initializer (a plain
+# threading.Lock would NOT work here -- these are separate OS processes
+# on Windows' spawn model, not threads).
+_summary_write_lock = None
+
+
+def _init_worker(lock):
+    global _summary_write_lock
+    _summary_write_lock = lock
+
 
 def generate_all_pairings(agent_ids: list = None) -> list:
     ids = agent_ids if agent_ids is not None else all_agent_ids()
@@ -45,11 +61,33 @@ def run_one_pairing(args: tuple) -> dict:
     THIS pairing (Section 4.4 anonymity); each worker process's
     get_shared_l5_blueprint() cache trains the L5 blueprint at most once
     per process, not once per pairing (the original per-pairing-instance
-    bug this sprint fixed)."""
+    bug this sprint fixed).
+
+    base_seed=None (Sprint 15's fully-random path): each agent gets its
+    OWN fresh os-entropy seed via random.SystemRandom, independently --
+    not derived from a shared base, so no two agents' internal RNG
+    streams are correlated even indirectly."""
     a_id, b_id, config, logs_dir, base_seed, pairing_idx, build_agent_fn = args
-    agent_a = build_agent_fn(a_id, seed=base_seed + pairing_idx * 2)
-    agent_b = build_agent_fn(b_id, seed=base_seed + pairing_idx * 2 + 1)
-    result = play_pairing(agent_a, agent_b, a_id, b_id, config, logs_dir)
+
+    if base_seed is None:
+        import random
+
+        sys_random = random.SystemRandom()
+        seed_a = sys_random.getrandbits(63)
+        seed_b = sys_random.getrandbits(63)
+    else:
+        seed_a = base_seed + pairing_idx * 2
+        seed_b = base_seed + pairing_idx * 2 + 1
+
+    agent_a = build_agent_fn(a_id, seed=seed_a)
+    agent_b = build_agent_fn(b_id, seed=seed_b)
+    # The pairings_summary.parquet write inside play_pairing is a shared-
+    # file read-modify-write across all worker processes -- MUST be
+    # serialized with the cross-process lock, or concurrent writes can
+    # corrupt the file (the real bug this fixes; see module-level note).
+    result = play_pairing(
+        agent_a, agent_b, a_id, b_id, config, logs_dir, summary_lock=_summary_write_lock
+    )
     return {
         "pairing_id": _pairing_id(a_id, b_id),
         "agent_a_id": a_id,
@@ -68,7 +106,16 @@ def run_full_integration_test(
     processes: int = None,
     agent_ids: list = None,
     build_agent_fn=None,
+    randomize_seeds: bool = False,
 ) -> dict:
+    """randomize_seeds=True (Sprint 15's final run): EVERY RNG --
+    match-level (deck/button, via MatchConfig.seed) AND each agent's own
+    internal Monte Carlo seed (L3/L4/L5's draws) -- is seeded from fresh
+    OS entropy per pairing, not deterministically derived from
+    `base_seed`/pairing index as Sprint 14's fixed-seed validation run
+    did. `base_seed` is ignored entirely when this is True; it exists
+    only for the fixed-seed (Sprint 14-style) path.
+    """
     Path(logs_dir).mkdir(parents=True, exist_ok=True)
     manifest_path = Path(logs_dir) / "manifest.txt"
 
@@ -83,16 +130,28 @@ def run_full_integration_test(
         "initial_big_blind": 100,
         "blind_escalation_interval_hands": 20,
         "max_hands": max_hands,
-        "seed": base_seed,
+        # Sprint 15: `seed=None` makes MatchConfig draw a fresh random
+        # deck/button every match (core_engine::match_engine already
+        # supports this -- see `seed: Option<u64>`, `None` branch).
+        "seed": None if randomize_seeds else base_seed,
     }
 
     pending = []
     for idx, (a_id, b_id) in enumerate(pairings):
         pid = _pairing_id(a_id, b_id)
         if pid not in completed:
-            pending.append((a_id, b_id, config, logs_dir, base_seed, idx, fn))
+            # Sprint 15: pass seed=None through to the worker so IT draws
+            # fresh entropy for each agent's own seed at build time,
+            # rather than this process pre-computing a seed value now
+            # (which would itself be a single random draw shared, in
+            # effect, across however many agent-seed slots derive from
+            # it -- see run_one_pairing's handling of agent_seed=None).
+            agent_seed_base = None if randomize_seeds else base_seed
+            pending.append((a_id, b_id, config, logs_dir, agent_seed_base, idx, fn))
 
-    print(f"Total pairings: {len(pairings)}. Already completed: {len(completed)}. Pending: {len(pending)}.")
+    print(
+        f"Total pairings: {len(pairings)}. Already completed: {len(completed)}. Pending: {len(pending)}."
+    )
     print(
         "NOTE: each worker process trains its own shared L5 blueprint ONCE on first "
         f"use (not once per pairing) -- with --processes N, expect N blueprint builds "
@@ -108,7 +167,11 @@ def run_full_integration_test(
 
     print(f"Starting pool with {processes or 'default'} processes...", flush=True)
 
-    with multiprocessing.Pool(processes=processes) as pool:
+    manager = multiprocessing.Manager()
+    summary_loc = manager.lock()
+
+        with multiprocessing.Pool(processes=processes, initializer=_init_worker, initargs=(summary_lock,)) as pool:
+
         for result in pool.imap_unordered(run_one_pairing, pending, chunksize=1):
             _append_completed(manifest_path, result["pairing_id"])
             completed_this_run += 1
@@ -120,4 +183,8 @@ def run_full_integration_test(
                 flush=True,
             )
 
-    return {"total_pairings": len(pairings), "completed_this_run": completed_this_run, "results": results}
+    return {
+        "total_pairings": len(pairings),
+        "completed_this_run": completed_this_run,
+        "results": results,
+    }

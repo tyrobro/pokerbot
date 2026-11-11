@@ -30,18 +30,28 @@ def play_leg(agent_a, agent_b, leg: int, config: dict) -> dict:
 
     while hand_number < config["max_hands"] and stack_a > 0 and stack_b > 0:
         if hand_number % 10 == 0:
-            print(f"      hand {hand_number}/{config['max_hands']} (stacks: {stack_a}, {stack_b})...", flush=True)
+            print(
+                f"      hand {hand_number}/{config['max_hands']} (stacks: {stack_a}, {stack_b})...",
+                flush=True,
+            )
         sb, bb = blinds_for_hand(
-            config["initial_small_blind"], config["initial_big_blind"], hand_number,
+            config["initial_small_blind"],
+            config["initial_big_blind"],
+            hand_number,
             config["blind_escalation_interval_hands"],
         )
         hand_seed = None if seed_base is None else seed_base + hand_number * 7919 + leg
 
         stack_a_before, stack_b_before = stack_a, stack_b
         try:
-            result = pokerbot_core.play_hand_py(agent_a, agent_b, button, sb, bb, stack_a, stack_b, hand_seed)
+            result = pokerbot_core.play_hand_py(
+                agent_a, agent_b, button, sb, bb, stack_a, stack_b, hand_seed
+            )
         except Exception as e:
-            print(f"      !! hand {hand_number} raised: {type(e).__name__}: {e}", flush=True)
+            print(
+                f"      !! hand {hand_number} raised: {type(e).__name__}: {e}",
+                flush=True,
+            )
             raise
         stack_a, stack_b = result["final_stack_a"], result["final_stack_b"]
 
@@ -49,17 +59,29 @@ def play_leg(agent_a, agent_b, leg: int, config: dict) -> dict:
         entry_a.self_stack_delta = stack_a - stack_a_before
         entry_b.self_stack_delta = stack_b - stack_b_before
 
-        hand_summaries.append({
-            "hand_number": hand_number,
-            "blind_level": 0 if config["blind_escalation_interval_hands"] == 0
-                else hand_number // config["blind_escalation_interval_hands"],
-            "small_blind": sb, "big_blind": bb, "button": button,
-            "hole_a": result["hole_a"], "hole_b": result["hole_b"], "board": result["board"],
-            "actions": result["actions"], "pot_progression": result["pot_progression"],
-            "ended_by_fold": result["ended_by_fold"], "winner": result["winner"],
-            "pot_awarded": result["pot_awarded"],
-            "stack_a_after": stack_a, "stack_b_after": stack_b,
-        })
+        hand_summaries.append(
+            {
+                "hand_number": hand_number,
+                "blind_level": (
+                    0
+                    if config["blind_escalation_interval_hands"] == 0
+                    else hand_number // config["blind_escalation_interval_hands"]
+                ),
+                "small_blind": sb,
+                "big_blind": bb,
+                "button": button,
+                "hole_a": result["hole_a"],
+                "hole_b": result["hole_b"],
+                "board": result["board"],
+                "actions": result["actions"],
+                "pot_progression": result["pot_progression"],
+                "ended_by_fold": result["ended_by_fold"],
+                "winner": result["winner"],
+                "pot_awarded": result["pot_awarded"],
+                "stack_a_after": stack_a,
+                "stack_b_after": stack_b,
+            }
+        )
 
         observe(agent_a, entry_a)
         observe(agent_b, entry_b)
@@ -75,14 +97,25 @@ def play_leg(agent_a, agent_b, leg: int, config: dict) -> dict:
     }
 
 
-def play_pairing(agent_a, agent_b, agent_a_id: str, agent_b_id: str, config: dict, logs_dir="logs") -> dict:
+def play_pairing(
+    agent_a,
+    agent_b,
+    agent_a_id: str,
+    agent_b_id: str,
+    config: dict,
+    logs_dir="logs",
+    summary_lock=None,
+) -> dict:
     starting_stack = config["starting_stack"]
     leg_results = []
     for leg in (1, 2):
         result = play_leg(agent_a, agent_b, leg, config)
         rows = build_hand_rows(
-            {"final_stack_a": result["final_stack_a"], "final_stack_b": result["final_stack_b"],
-             "hand_summaries": result["hand_summaries"]},
+            {
+                "final_stack_a": result["final_stack_a"],
+                "final_stack_b": result["final_stack_b"],
+                "hand_summaries": result["hand_summaries"],
+            },
             starting_stack,
         )
         write_leg_logs(rows, agent_a_id, agent_b_id, leg, logs_dir)
@@ -99,11 +132,26 @@ def play_pairing(agent_a, agent_b, agent_a_id: str, agent_b_id: str, config: dic
     pa = pairing_score(leg1_a, leg2_a)
     pb = pairing_score(leg1_b, leg2_b)
 
-    append_pairing_summary(agent_a_id, agent_b_id, leg1_a, leg1_b, leg2_a, leg2_b, pa, pb, logs_dir)
+    # Real concurrency bug (Sprint 15): this read-modify-write on a
+    # SHARED file must be serialized across worker processes, or
+    # concurrent writes corrupt pairings_summary.parquet. summary_lock is
+    # None in single-process contexts (tests, Sprint 9/14's serial
+    # callers) where no locking is needed.
+    if summary_lock is not None:
+        with summary_lock:
+            append_pairing_summary(
+                agent_a_id, agent_b_id, leg1_a, leg1_b, leg2_a, leg2_b, pa, pb, logs_dir
+            )
+    else:
+        append_pairing_summary(
+            agent_a_id, agent_b_id, leg1_a, leg1_b, leg2_a, leg2_b, pa, pb, logs_dir
+        )
 
     return {
-        "agent_a_id": agent_a_id, "agent_b_id": agent_b_id,
-        "pairing_score_a": pa, "pairing_score_b": pb,
+        "agent_a_id": agent_a_id,
+        "agent_b_id": agent_b_id,
+        "pairing_score_a": pa,
+        "pairing_score_b": pb,
         "leg_results": leg_results,
     }
 
