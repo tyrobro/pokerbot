@@ -168,10 +168,11 @@ def run_full_integration_test(
     print(f"Starting pool with {processes or 'default'} processes...", flush=True)
 
     manager = multiprocessing.Manager()
-    summary_loc = manager.lock()
+    summary_lock = manager.Lock()
 
-        with multiprocessing.Pool(processes=processes, initializer=_init_worker, initargs=(summary_lock,)) as pool:
-
+    with multiprocessing.Pool(
+        processes=processes, initializer=_init_worker, initargs=(summary_lock,)
+    ) as pool:
         for result in pool.imap_unordered(run_one_pairing, pending, chunksize=1):
             _append_completed(manifest_path, result["pairing_id"])
             completed_this_run += 1
